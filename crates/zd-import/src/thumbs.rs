@@ -84,8 +84,7 @@ impl ThumbCache {
 
 fn decode(src: &Path, mime: &str) -> Result<DynamicImage, String> {
     if mime.starts_with("video/") {
-        return crate::video::poster(src)
-            .ok_or_else(|| "no poster frame (install ffmpeg for video frames)".into());
+        return crate::video::poster(src);
     }
     if is_raw(mime) {
         return embedded_jpeg(src).ok_or_else(|| "no embedded preview in RAW file".to_string());

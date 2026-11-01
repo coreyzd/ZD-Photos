@@ -149,35 +149,58 @@ fn qt_time(secs: u64) -> Option<String> {
 }
 
 /// A poster frame for the grid and viewer.
-pub fn poster(path: &Path) -> Option<DynamicImage> {
-    ffmpeg_frame(path).or_else(|| {
-        let info = probe(path).ok()?;
-        crate::thumbs::largest_jpeg_in(&info.meta_bytes)
-    })
+pub fn poster(path: &Path) -> Result<DynamicImage, String> {
+    let ffmpeg_err = match ffmpeg_frame(path) {
+        Ok(img) => return Ok(img),
+        Err(e) => e,
+    };
+    probe(path)
+        .ok()
+        .and_then(|info| crate::thumbs::largest_jpeg_in(&info.meta_bytes))
+        .ok_or_else(|| format!("no poster frame: {ffmpeg_err}"))
 }
 
-/// One frame ~1 s in, via ffmpeg if installed.
-fn ffmpeg_frame(path: &Path) -> Option<DynamicImage> {
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-ss", "1", "-i"])
-        .arg(path)
-        .args([
-            "-frames:v",
-            "1",
-            "-vf",
-            "scale='min(2560,iw)':-2",
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "mjpeg",
-            "-",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() || out.stdout.is_empty() {
-        return None;
+/// One frame via ffmpeg (if installed): ~1 s in, or the very first frame for short clips.
+/// Frames are converted to 8-bit RGB first, so 10-bit HDR phone video (Pixel, iPhone) works
+/// with any ffmpeg build, and sent back as PNG.
+fn ffmpeg_frame(path: &Path) -> Result<DynamicImage, String> {
+    let mut last_err = String::new();
+    for seek in ["1", "0"] {
+        let out = match Command::new("ffmpeg")
+            .args(["-nostdin", "-v", "error", "-ss", seek, "-i"])
+            .arg(path)
+            .args([
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=w='min(2560,iw)':h=-2,format=rgb24",
+                "-f",
+                "image2pipe",
+                "-c:v",
+                "png",
+                "-",
+            ])
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => return Err(format!("couldn't run ffmpeg ({e}); install ffmpeg for video frames")),
+        };
+        if out.status.success() && !out.stdout.is_empty() {
+            return image::load_from_memory_with_format(&out.stdout, image::ImageFormat::Png)
+                .map_err(|e| format!("ffmpeg frame unreadable: {e}"));
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        last_err = stderr
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("ffmpeg produced no frame")
+            .trim()
+            .to_string();
     }
-    image::load_from_memory_with_format(&out.stdout, image::ImageFormat::Jpeg).ok()
+    Err(format!("ffmpeg: {last_err}"))
 }
 
 #[cfg(test)]
