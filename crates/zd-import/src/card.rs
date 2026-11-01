@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use zd_catalog::{Catalog, VolumeKind};
 
-use crate::{fingerprint, ingest, record, Error, Progress, Result, ScanReport, ThumbCache};
+use crate::{fingerprint, ingest, record, Error, Phase, Progress, Result, ScanReport, ThumbCache};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CardItem {
@@ -78,7 +78,7 @@ pub fn import(
     let mut report = CardReport::default();
     let total = items.len();
     for (i, item) in items.iter().enumerate() {
-        progress(&Progress { done: i, total, current: item.src.clone() });
+        progress(&Progress { phase: Phase::Adding, done: i, total, current: item.src.clone() });
         if item.already_imported {
             report.skipped_already_imported += 1;
             continue;
@@ -100,7 +100,7 @@ pub fn import(
             Err(e) => report.failed.push((item.src.clone(), e)),
         }
     }
-    progress(&Progress { done: total, total, current: dest_root.to_path_buf() });
+    progress(&Progress { phase: Phase::Adding, done: total, total, current: dest_root.to_path_buf() });
     Ok(report)
 }
 

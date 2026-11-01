@@ -57,6 +57,12 @@ enum Cmd {
     Info { id: i64 },
     /// Add a tag like "Birds/Great Blue Heron" to a photo.
     Tag { id: i64, tag: String },
+    /// Retry photos that have no thumbnail and print why any still fail.
+    Thumbs {
+        /// How many to try (newest first).
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
     /// Catalog totals.
     Stats,
 }
@@ -72,7 +78,12 @@ fn data_dir(cli: &Cli) -> Result<PathBuf> {
 
 fn progress_bar(p: &Progress) {
     let name = p.current.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    eprint!("\r  {}/{}  {:<40.40}", p.done, p.total, name);
+    let what = match p.phase {
+        zd_import::Phase::Finding => "finding",
+        zd_import::Phase::Checking => "checking",
+        zd_import::Phase::Adding => "adding",
+    };
+    eprint!("\r  {what:<8} {}/{}  {:<40.40}", p.done, p.total, name);
     let _ = std::io::stderr().flush();
 }
 
@@ -190,6 +201,29 @@ fn main() -> Result<()> {
             let t = catalog.tag_path(&tag)?;
             catalog.tag_photo(id, t)?;
             println!("tags: {:?}", catalog.photo_tags(id)?);
+        }
+        Cmd::Thumbs { limit } => {
+            refresh(&catalog)?;
+            let todo = catalog.photos_without_thumbnail(limit)?;
+            println!(
+                "{} photos without a thumbnail (trying up to {limit})",
+                catalog.stats()?.without_thumbnail
+            );
+            let (mut fixed, mut offline) = (0, 0);
+            for p in todo {
+                let Some(path) = catalog.locations(p.id)?.iter().find_map(|l| l.current_path()) else {
+                    offline += 1;
+                    continue;
+                };
+                match cache.generate(&path, &p.fingerprint, &p.meta.mime, p.meta.orientation) {
+                    Ok(()) => {
+                        catalog.set_has_thumbnail(p.id, true)?;
+                        fixed += 1;
+                    }
+                    Err(e) => println!("  ! {} ({}): {e}", path.display(), p.meta.mime),
+                }
+            }
+            println!("fixed {fixed}; {offline} skipped because their drive isn't plugged in");
         }
         Cmd::Stats => {
             println!("{}", serde_json::to_string_pretty(&catalog.stats()?)?);

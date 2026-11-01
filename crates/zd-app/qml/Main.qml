@@ -45,7 +45,14 @@ ApplicationWindow {
             if (i >= 0 && i + 1 < args.length)
                 scanFolder(Qt.resolvedUrl("file://" + args[i + 1]).toString())
         }
-        onRevisionChanged: { grid.model = 0; grid.model = library.count }
+        // Rebuild the grid but keep her place, so photos appearing during a scan don't
+        // throw the view back to the top.
+        onRevisionChanged: {
+            const y = grid.contentY
+            grid.model = 0
+            grid.model = library.count
+            grid.contentY = Math.min(y, Math.max(0, grid.contentHeight - grid.height))
+        }
     }
 
     FolderDialog {
@@ -172,16 +179,20 @@ ApplicationWindow {
             }
             Label {
                 visible: library.scanning
-                text: library.progressTotal > 0
-                    ? "Adding photos: " + library.progressDone + " of " + library.progressTotal
-                    : library.status
+                text: library.progressPhase === "finding"
+                    ? "Looking for photos… " + library.progressDone.toLocaleString(Qt.locale(), "f", 0) + " found"
+                    : library.progressPhase === "checking"
+                    ? "Checking photos already in your library: " + library.progressDone.toLocaleString(Qt.locale(), "f", 0)
+                      + " of " + library.progressTotal.toLocaleString(Qt.locale(), "f", 0)
+                    : "Adding photos: " + library.progressDone.toLocaleString(Qt.locale(), "f", 0)
+                      + " of " + library.progressTotal.toLocaleString(Qt.locale(), "f", 0)
                 color: win.ink
                 font.pixelSize: 13
             }
             ProgressBar {
                 visible: library.scanning
                 Layout.fillWidth: true
-                indeterminate: library.progressTotal === 0
+                indeterminate: library.progressPhase === "finding" || library.progressTotal === 0
                 from: 0
                 to: Math.max(1, library.progressTotal)
                 value: library.progressDone
@@ -297,6 +308,29 @@ ApplicationWindow {
                     anchors.margins: 2
                     color: "#2a2a2a"
                     clip: true
+
+                    // No thumbnail yet (or the file couldn't be read): show its name instead of a blank tile.
+                    Column {
+                        readonly property string name: library.placeholder(index)
+                        visible: name !== ""
+                        anchors.centerIn: parent
+                        width: parent.width - 16
+                        spacing: 6
+                        Label {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: "\u25A1"
+                            color: win.quiet
+                            font.pixelSize: 28
+                        }
+                        Label {
+                            width: parent.width
+                            horizontalAlignment: Text.AlignHCenter
+                            text: parent.name
+                            color: win.quiet
+                            font.pixelSize: 11
+                            elide: Text.ElideMiddle
+                        }
+                    }
 
                     Image {
                         anchors.fill: parent

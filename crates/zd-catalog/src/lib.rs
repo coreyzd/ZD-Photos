@@ -208,6 +208,9 @@ pub struct PhotoSummary {
     pub duration_ms: Option<u64>,
     /// At least one copy is on a plugged-in drive right now.
     pub available: bool,
+    pub has_thumbnail: bool,
+    /// File name of one copy (for the placeholder when there's no thumbnail).
+    pub file_name: Option<String>,
 }
 
 /// The last-known state of a file on a volume, used to skip unchanged files.
@@ -530,7 +533,9 @@ impl Catalog {
         let mut st = self.conn.prepare(
             "SELECT p.id, p.fingerprint, p.taken_at, p.camera_model, p.mime, p.duration_ms,
                     EXISTS(SELECT 1 FROM photo_files f JOIN volumes v ON v.id = f.volume_id
-                           WHERE f.photo_id = p.id AND f.missing = 0 AND v.online = 1) AS available
+                           WHERE f.photo_id = p.id AND f.missing = 0 AND v.online = 1) AS available,
+                    p.has_thumbnail,
+                    (SELECT f.rel_path FROM photo_files f WHERE f.photo_id = p.id LIMIT 1) AS rel_path
              FROM photos p
              WHERE ?1 IS NULL OR EXISTS(SELECT 1 FROM photo_files f
                                         WHERE f.photo_id = p.id AND f.volume_id = ?1 AND f.missing = 0)
@@ -545,6 +550,10 @@ impl Catalog {
                 is_video: r.get::<_, String>(4)?.starts_with("video/"),
                 duration_ms: r.get::<_, Option<i64>>(5)?.map(|d| d as u64),
                 available: r.get(6)?,
+                has_thumbnail: r.get(7)?,
+                file_name: r
+                    .get::<_, Option<String>>(8)?
+                    .map(|p| p.rsplit('/').next().unwrap_or(&p).to_string()),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

@@ -42,9 +42,21 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Progress {
+    pub phase: Phase,
     pub done: usize,
     pub total: usize,
     pub current: PathBuf,
+}
+
+/// What a scan is doing right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Phase {
+    /// Listing files (total not known yet; `done` counts files found so far).
+    Finding,
+    /// Re-checking photos already in the catalog (cheap: size and date only).
+    Checking,
+    /// Reading, fingerprinting and making thumbnails for new or changed files.
+    Adding,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -136,16 +148,25 @@ fn skip_dir(name: &str) -> bool {
 
 /// All photo files under `folder`.
 pub fn find_media(folder: &Path) -> Vec<PathBuf> {
-    walkdir::WalkDir::new(folder)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            e.depth() == 0 || !(e.file_type().is_dir() && skip_dir(&e.file_name().to_string_lossy()))
-        })
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file() && metadata::media_type(e.path()).is_some())
-        .map(|e| e.into_path())
-        .collect()
+    find_media_with(folder, &mut |_, _| true)
+}
+
+/// [`find_media`], calling `on_file(count_so_far, path)` for each file found; stops early
+/// (returning what it has) when `on_file` returns false.
+pub fn find_media_with(folder: &Path, on_file: &mut dyn FnMut(usize, &Path) -> bool) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let walk = walkdir::WalkDir::new(folder).follow_links(false).into_iter().filter_entry(|e| {
+        e.depth() == 0 || !(e.file_type().is_dir() && skip_dir(&e.file_name().to_string_lossy()))
+    });
+    for e in walk.filter_map(|e| e.ok()) {
+        if e.file_type().is_file() && metadata::media_type(e.path()).is_some() {
+            out.push(e.into_path());
+            if !on_file(out.len(), out.last().map(PathBuf::as_path).unwrap_or(folder)) {
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Catalogue every photo under `folder`, which must be on a known, online volume.
@@ -174,8 +195,17 @@ pub fn scan_cancellable(
     let volume = volume.clone();
     let started = zd_catalog::timestamp();
 
-    let files = find_media(&folder);
+    let files = find_media_with(&folder, &mut |found, path| {
+        if found % 200 == 0 {
+            progress(&Progress { phase: Phase::Finding, done: found, total: 0, current: path.to_path_buf() });
+        }
+        !cancel.load(Ordering::Relaxed)
+    });
     let mut report = ScanReport { files_found: files.len(), ..Default::default() };
+    if cancel.load(Ordering::Relaxed) {
+        report.cancelled = true;
+        return Ok(report);
+    }
     let total = files.len();
     let rel_of = |p: &Path| -> String {
         let r = zd_volumes::rel_string(p.strip_prefix(&folder).unwrap_or(p));
@@ -186,28 +216,42 @@ pub fn scan_cancellable(
         }
     };
 
-    // Cheap pass: skip what hasn't changed since last time.
+    // Cheap pass: skip what hasn't changed since last time. Committed every 500 files so the
+    // UI sees progress and a Stop takes effect quickly.
     let mut todo = Vec::new();
-    catalog.batch(|c| {
-        for path in files {
-            let rel = rel_of(&path);
-            let unchanged = match (c.file_record(volume.id, &rel)?, std::fs::metadata(&path)) {
-                (Some(rec), Ok(md)) => {
-                    rec.size == md.len()
-                        && rec.modified == mtime(&md)
-                        && c.photo(rec.photo_id)?.is_some_and(|p| p.has_thumbnail)
-                }
-                _ => false,
-            };
-            if unchanged {
-                c.touch_file(volume.id, &rel)?;
-                report.unchanged += 1;
-            } else {
-                todo.push((path, rel));
-            }
+    for (n, batch) in files.chunks(500).enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            report.cancelled = true;
+            return Ok(report);
         }
-        Ok::<_, Error>(())
-    })?;
+        catalog.batch(|c| {
+            for path in batch {
+                let rel = rel_of(path);
+                let unchanged = match (c.file_record(volume.id, &rel)?, std::fs::metadata(path)) {
+                    (Some(rec), Ok(md)) => {
+                        rec.size == md.len()
+                            && rec.modified == mtime(&md)
+                            && c.photo(rec.photo_id)?.is_some_and(|p| p.has_thumbnail)
+                    }
+                    _ => false,
+                };
+                if unchanged {
+                    c.touch_file(volume.id, &rel)?;
+                    report.unchanged += 1;
+                } else {
+                    todo.push((path.clone(), rel));
+                }
+            }
+            Ok::<_, Error>(())
+        })?;
+        let done = (n * 500 + batch.len()).min(total);
+        progress(&Progress {
+            phase: Phase::Checking,
+            done,
+            total,
+            current: batch.last().cloned().unwrap_or_default(),
+        });
+    }
 
     // Expensive pass, in parallel chunks; each chunk is committed as one transaction.
     let mut done = report.unchanged;
@@ -218,19 +262,22 @@ pub fn scan_cancellable(
         }
         let results: Vec<_> =
             chunk.par_iter().map(|(p, rel)| ingest(p.clone(), rel.clone(), cache)).collect();
+        let mut last = PathBuf::new();
         catalog.batch(|c| {
             for r in results {
                 done += 1;
                 match r {
                     Ok(it) => {
-                        progress(&Progress { done, total, current: it.path.clone() });
                         record(c, &volume, &it, &mut report)?;
+                        last = it.path;
                     }
                     Err(f) => report.failed.push(f),
                 }
             }
             Ok::<_, Error>(())
         })?;
+        // Reported after the commit, so anything reacting to it sees the new photos.
+        progress(&Progress { phase: Phase::Adding, done, total, current: last });
     }
 
     report.missing = catalog.mark_unseen_missing(volume.id, &prefix, &started)?;

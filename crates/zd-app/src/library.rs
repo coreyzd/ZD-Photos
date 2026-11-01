@@ -26,6 +26,8 @@ pub mod qobject {
         #[qproperty(i32, progress_done)]
         #[qproperty(i32, progress_total)]
         #[qproperty(QString, progress_file)]
+        /// finding | checking | adding
+        #[qproperty(QString, progress_phase)]
         #[qproperty(i32, volume_count)]
         #[qproperty(i32, selected_volume)]
         #[qproperty(QString, view_title)]
@@ -57,6 +59,9 @@ pub mod qobject {
         /// "1:15" for videos, empty for photos.
         #[qinvokable]
         fn duration(self: &Library, index: i32) -> QString;
+        /// No thumbnail could be made yet: the grid shows a placeholder with this file name.
+        #[qinvokable]
+        fn placeholder(self: &Library, index: i32) -> QString;
         #[qinvokable]
         fn is_offline(self: &Library, index: i32) -> bool;
 
@@ -96,6 +101,8 @@ use zd_import::{Size, ThumbCache};
 
 struct Item {
     thumb: String,
+    /// Empty when there's a thumbnail; otherwise the file name to show instead.
+    placeholder: String,
     caption: String,
     duration: String,
     offline: bool,
@@ -116,6 +123,7 @@ pub struct LibraryRust {
     progress_done: i32,
     progress_total: i32,
     progress_file: QString,
+    progress_phase: QString,
     volume_count: i32,
     selected_volume: i32,
     view_title: QString,
@@ -153,6 +161,7 @@ impl Default for LibraryRust {
             progress_done: 0,
             progress_total: 0,
             progress_file: QString::default(),
+            progress_phase: QString::default(),
             volume_count: 0,
             selected_volume: -1,
             view_title: QString::from("All photos"),
@@ -276,7 +285,16 @@ impl qobject::Library {
                     .filter(|s| !s.is_empty())
                     .collect();
                 Item {
-                    thumb: file_url(&rust.cache.path(&p.fingerprint, Size::Thumb)),
+                    thumb: if p.has_thumbnail {
+                        file_url(&rust.cache.path(&p.fingerprint, Size::Thumb))
+                    } else {
+                        String::new()
+                    },
+                    placeholder: if p.has_thumbnail {
+                        String::new()
+                    } else {
+                        p.file_name.clone().unwrap_or_else(|| "No preview".into())
+                    },
                     caption: caption.join(" · "),
                     duration: if p.is_video { clock(p.duration_ms.unwrap_or(0)) } else { String::new() },
                     offline: !p.available,
@@ -355,6 +373,7 @@ impl qobject::Library {
         let qt = self.qt_thread();
 
         self.as_mut().set_scanning(true);
+        self.as_mut().set_progress_phase(QString::from("finding"));
         self.as_mut().set_progress_done(0);
         self.as_mut().set_progress_total(0);
         self.as_mut().set_status(QString::from(&format!("Looking for photos in {}…", path.display())));
@@ -368,7 +387,13 @@ impl qobject::Library {
                 let _ = zd_volumes::home::connect(&catalog, &mounts);
 
                 let mut last = Instant::now() - Duration::from_secs(1);
+                let mut last_reload = Instant::now();
                 let mut on_progress = |p: &zd_import::Progress| {
+                    // Show newly added photos every few seconds, not only at the end.
+                    if last_reload.elapsed() >= Duration::from_secs(3) {
+                        last_reload = Instant::now();
+                        let _ = qt.queue(|lib| lib.reload());
+                    }
                     // ~8 updates a second is plenty and keeps the event loop free.
                     if last.elapsed() < Duration::from_millis(120) && p.done < p.total {
                         return;
@@ -377,7 +402,13 @@ impl qobject::Library {
                     let (done, total) = (p.done as i32, p.total as i32);
                     let name =
                         p.current.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let phase = match p.phase {
+                        zd_import::Phase::Finding => "finding",
+                        zd_import::Phase::Checking => "checking",
+                        zd_import::Phase::Adding => "adding",
+                    };
                     let _ = qt.queue(move |mut lib| {
+                        lib.as_mut().set_progress_phase(QString::from(phase));
                         lib.as_mut().set_progress_done(done);
                         lib.as_mut().set_progress_total(total);
                         lib.as_mut().set_progress_file(QString::from(&name));
@@ -427,6 +458,10 @@ impl qobject::Library {
 
     pub fn duration(&self, index: i32) -> QString {
         self.item(index).map(|i| QString::from(&i.duration)).unwrap_or_default()
+    }
+
+    pub fn placeholder(&self, index: i32) -> QString {
+        self.item(index).map(|i| QString::from(&i.placeholder)).unwrap_or_default()
     }
 
     pub fn is_offline(&self, index: i32) -> bool {
