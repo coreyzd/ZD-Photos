@@ -96,7 +96,7 @@ pub fn identify(
 
     let uuid = if let Some(marker) = read_marker(&m.mount) {
         marker.uuid
-    } else if let Some(uuid) = card.then(&derived_uuid).flatten() {
+    } else if let Some(uuid) = card.then(derived_uuid).flatten() {
         uuid // never write to a camera card
     } else if let Some(uuid) = m.fs_id.as_deref().and_then(&known_by_fs_id) {
         uuid
