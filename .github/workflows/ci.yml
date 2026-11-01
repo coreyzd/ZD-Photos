@@ -32,6 +32,26 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: echo "QMAKE=$env:QT_ROOT_DIR\bin\qmake.exe" >> $env:GITHUB_ENV
+      - name: HEIC library (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libheif-dev libheif-plugin-libde265
+      # Windows: libheif (with the libde265 HEVC decoder) built by vcpkg, linked statically.
+      # The first build takes a while; the cache makes later runs quick.
+      - name: Cache vcpkg packages (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg-binary-cache
+          key: vcpkg-libheif-x64-windows-static-md-v1
+      - name: HEIC library (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force C:\vcpkg-binary-cache | Out-Null
+          $env:VCPKG_BINARY_SOURCES = "clear;files,C:\vcpkg-binary-cache,readwrite"
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install libheif:x64-windows-static-md
+          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+          echo "VCPKGRS_TRIPLET=x64-windows-static-md" >> $env:GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
