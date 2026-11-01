@@ -13,11 +13,18 @@ blake3.workspace = true
 kamadak-exif.workspace = true
 image.workspace = true
 jpeg-decoder.workspace = true
+libheif-rs = { workspace = true, optional = true }
 walkdir.workspace = true
 chrono.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+
+[features]
+default = ["heic"]
+# Pixel / iPhone HEIC photos via libheif. Turn off (`--no-default-features`) to build
+# without libheif installed; HEIC files then get placeholder tiles.
+heic = ["dep:libheif-rs"]
 
 [dev-dependencies]
 tempfile.workspace = true

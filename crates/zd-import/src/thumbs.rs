@@ -61,7 +61,8 @@ impl ThumbCache {
         orientation: u16,
     ) -> Result<(), String> {
         let img = decode(src, mime)?;
-        let img = orient(img, orientation);
+        // libheif already applies the HEIC file's own rotation; don't rotate twice.
+        let img = if mime == "image/heic" { img } else { orient(img, orientation) };
         let preview = shrink(&img, Size::Preview.max_edge());
         self.write(&preview, &self.path(fingerprint, Size::Preview))?;
         let thumb = preview.thumbnail(Size::Thumb.max_edge(), Size::Thumb.max_edge());
@@ -90,7 +91,7 @@ fn decode(src: &Path, mime: &str) -> Result<DynamicImage, String> {
         return embedded_jpeg(src).ok_or_else(|| "no embedded preview in RAW file".to_string());
     }
     if mime == "image/heic" {
-        return Err("HEIC decoding arrives with libheif in Phase 1".into());
+        return decode_heic(src);
     }
     if mime == "image/jpeg" {
         if let Some(img) = jpeg_scaled(src, Size::Preview.max_edge()) {
@@ -102,6 +103,32 @@ fn decode(src: &Path, mime: &str) -> Result<DynamicImage, String> {
         .map_err(|e| e.to_string())?
         .decode()
         .map_err(|e| e.to_string())
+}
+
+/// HEIC (Pixel, iPhone) through libheif, already rotated/cropped as the file specifies.
+#[cfg(feature = "heic")]
+fn decode_heic(src: &Path) -> Result<DynamicImage, String> {
+    use libheif_rs::{ColorSpace, HeifContext, LibHeif, RgbChroma};
+    let path = src.to_str().ok_or("path is not valid UTF-8")?;
+    let ctx = HeifContext::read_from_file(path).map_err(|e| e.to_string())?;
+    let handle = ctx.primary_image_handle().map_err(|e| e.to_string())?;
+    let img =
+        LibHeif::new().decode(&handle, ColorSpace::Rgb(RgbChroma::Rgb), None).map_err(|e| e.to_string())?;
+    let plane = img.planes().interleaved.ok_or("no RGB data")?;
+    let (w, h, stride) = (plane.width, plane.height, plane.stride);
+    let row = w as usize * 3;
+    let mut rgb = Vec::with_capacity(row * h as usize);
+    for y in 0..h as usize {
+        rgb.extend_from_slice(&plane.data[y * stride..y * stride + row]);
+    }
+    image::RgbImage::from_raw(w, h, rgb)
+        .map(DynamicImage::ImageRgb8)
+        .ok_or_else(|| "bad HEIC image size".into())
+}
+
+#[cfg(not(feature = "heic"))]
+fn decode_heic(_src: &Path) -> Result<DynamicImage, String> {
+    Err("this build has no HEIC support (built without the `heic` feature)".into())
 }
 
 /// Decode a JPEG at 1/2, 1/4 or 1/8 size directly (the DCT can skip detail), choosing the
@@ -215,6 +242,18 @@ mod tests {
         jpeg(&small, 800, 600);
         let img = jpeg_scaled(&small, 2560).unwrap();
         assert_eq!((img.width(), img.height()), (800, 600));
+    }
+
+    #[cfg(feature = "heic")]
+    #[test]
+    fn heic_thumbnails() {
+        // A real 640x480 HEIC made with libheif's heif-enc (checked in as a fixture).
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/small-heic.bin");
+        let d = tempfile::tempdir().unwrap();
+        let cache = ThumbCache::new(d.path().join("cache"));
+        cache.generate(&src, "beef", "image/heic", 6).unwrap(); // EXIF orientation must be ignored
+        let t = image::open(cache.path("beef", Size::Thumb)).unwrap();
+        assert_eq!((t.width(), t.height()), (512, 384));
     }
 
     #[test]

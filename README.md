@@ -6,7 +6,7 @@ Design doc and roadmap: <https://claude.ai/artifact/9D3huBc87zkKkERRYMSVyi>
 
 ## Status: Phase 1 — Library (in progress)
 
-Phase 0 (foundations) is complete and verified on her Windows laptop. Phase 1 so far: background scanning with progress and Stop, a drives sidebar (photo counts, filter by drive, rename by double-click or right-click), cloud drives (Google Drive, OneDrive, Dropbox) recognised and never written to, and roughly 2× faster thumbnails for large JPEGs.
+Phase 0 (foundations) is complete and verified on her Windows laptop. Phase 1 so far: HEIC photos (libheif), background scanning with phase progress and Stop, live grid updates during scans, placeholder tiles naming any file that couldn't be previewed (`zdp thumbs` explains why and retries), a drives sidebar (photo counts, filter by drive, rename by double-click or right-click), cloud drives (Google Drive, OneDrive, Dropbox) recognised and never written to, and roughly 2× faster thumbnails for large JPEGs.
 
 | Crate | What it does |
 | --- | --- |
@@ -27,10 +27,12 @@ CI (GitHub Actions) lints, tests and builds everything on Linux and Windows, and
 
 ## Building
 
-Requires Rust 1.82+ and, for the app, Qt 6 (base + declarative). Without Qt, build the core with `cargo test --workspace --exclude zd-app`.
+Requires Rust 1.82+, libheif 1.17+ (for Pixel/iPhone HEIC photos) and, for the app, Qt 6 (base + declarative). Without Qt, build the core with `cargo test --workspace --exclude zd-app`; without libheif, add `--no-default-features` for `zd-import` (HEIC files then show placeholder tiles).
 
 ```sh
-# Fedora / Nobara: sudo dnf install qt6-qtbase-devel qt6-qtdeclarative-devel
+# Fedora / Nobara: sudo dnf install qt6-qtbase-devel qt6-qtdeclarative-devel libheif-devel
+#   HEIC photos are HEVC-compressed; Fedora's own libheif can't decode HEVC, the RPM Fusion
+#   plugin can: sudo dnf install libheif-freeworld
 cargo test --workspace
 cargo run -p zd-app            # the app
 cargo run -p zd-cli -- --help  # the command-line tool
@@ -67,7 +69,6 @@ Either way it's the same Home Library: the hidden marker file in the share's top
 
 Videos from the R7 (and the Pixel) are catalogued like photos: MP4, M4V and MOV, with capture date, length, frame size and camera details. The grid shows a poster frame with a ▶ length badge. Poster frames come from `ffmpeg` when it's installed (Nobara ships it); otherwise from the small thumbnail Canon embeds in each video. Playback arrives in Phase 1.
 
-## Known limits in Phase 0
+## Known limits
 
-- HEIC thumbnails wait for libheif (Phase 1).
 - RAW files (CR3/CR2/DNG) use their embedded JPEG preview for thumbnails; full RAW development via LibRaw comes with the editor (Phase 2).
