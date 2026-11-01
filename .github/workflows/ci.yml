@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Her laptop runs Windows; we develop on Linux. Both must stay green.
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.*"
+          cache: true
+      - name: Point cxx-qt at Qt (Linux)
+        if: runner.os == 'Linux'
+        run: echo "QMAKE=$QT_ROOT_DIR/bin/qmake" >> "$GITHUB_ENV"
+      - name: Point cxx-qt at Qt (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: echo "QMAKE=$env:QT_ROOT_DIR\bin\qmake.exe" >> $env:GITHUB_ENV
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Build release binaries
+        run: cargo build --release -p zd-cli -p zd-app
+      - name: Bundle Qt next to the app (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/zd-photos.exe, target/release/zdp.exe dist/
+          & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --release --qmldir crates/zd-app/qml dist/zd-photos.exe
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: zd-photos-windows
+          path: dist/

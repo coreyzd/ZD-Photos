@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+authors = ["Corey <coreyzd@gmail.com>"]
+
+[workspace.dependencies]
+zd-catalog = { path = "crates/zd-catalog" }
+zd-volumes = { path = "crates/zd-volumes" }
+zd-import = { path = "crates/zd-import" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+blake3 = "1"
+kamadak-exif = "0.6"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "tiff"] }
+walkdir = "2"
+clap = { version = "4", features = ["derive", "env"] }
+directories = "5"
+tempfile = "3"
+rayon = "1"
+
+[profile.dev.package."*"]
+# Image decoding is painfully slow unoptimized; optimize dependencies even in debug builds.
+opt-level = 2

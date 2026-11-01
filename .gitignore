@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+.zdphotos-data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.idea/
+.vscode/
+.qmlls.ini

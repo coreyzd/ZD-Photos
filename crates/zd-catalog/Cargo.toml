@@ -1,0 +1,16 @@
+[package]
+name = "zd-catalog"
+description = "ZD-Photos catalog: the SQLite source of truth for volumes, photos, files and tags"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

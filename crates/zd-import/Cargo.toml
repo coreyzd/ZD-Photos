@@ -1,0 +1,22 @@
+[package]
+name = "zd-import"
+description = "ZD-Photos import: scanning, fingerprints, EXIF, thumbnails and SD card import"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zd-catalog.workspace = true
+zd-volumes.workspace = true
+blake3.workspace = true
+kamadak-exif.workspace = true
+image.workspace = true
+walkdir.workspace = true
+chrono.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
