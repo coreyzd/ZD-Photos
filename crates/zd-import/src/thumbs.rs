@@ -92,11 +92,45 @@ fn decode(src: &Path, mime: &str) -> Result<DynamicImage, String> {
     if mime == "image/heic" {
         return Err("HEIC decoding arrives with libheif in Phase 1".into());
     }
+    if mime == "image/jpeg" {
+        if let Some(img) = jpeg_scaled(src, Size::Preview.max_edge()) {
+            return Ok(img);
+        }
+    }
     image::ImageReader::open(src)
         .and_then(|r| r.with_guessed_format())
         .map_err(|e| e.to_string())?
         .decode()
         .map_err(|e| e.to_string())
+}
+
+/// Decode a JPEG at 1/2, 1/4 or 1/8 size directly (the DCT can skip detail), choosing the
+/// smallest scale whose longest edge is still at least `max_edge`. For a 32 MP R7 photo
+/// that's a quarter of the pixels and several times faster than a full decode.
+fn jpeg_scaled(src: &Path, max_edge: u32) -> Option<DynamicImage> {
+    let f = std::fs::File::open(src).ok()?;
+    let mut d = jpeg_decoder::Decoder::new(std::io::BufReader::new(f));
+    d.read_info().ok()?;
+    let info = d.info()?;
+    let (w, h) = (u32::from(info.width), u32::from(info.height));
+    let (rw, rh) = if w >= h {
+        (max_edge.min(w), (u64::from(max_edge.min(w)) * u64::from(h)).div_ceil(u64::from(w)) as u32)
+    } else {
+        ((u64::from(max_edge.min(h)) * u64::from(w)).div_ceil(u64::from(h)) as u32, max_edge.min(h))
+    };
+    d.scale(rw.min(u32::from(u16::MAX)) as u16, rh.min(u32::from(u16::MAX)) as u16).ok()?;
+    let pixels = d.decode().ok()?;
+    let info = d.info()?;
+    let (w, h) = (u32::from(info.width), u32::from(info.height));
+    match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => {
+            image::RgbImage::from_raw(w, h, pixels).map(DynamicImage::ImageRgb8)
+        }
+        jpeg_decoder::PixelFormat::L8 => {
+            image::GrayImage::from_raw(w, h, pixels).map(DynamicImage::ImageLuma8)
+        }
+        _ => None, // CMYK and 16-bit: let the general decoder handle it
+    }
 }
 
 /// RAW files (CR3, CR2, DNG) carry JPEG previews. Pick the largest one that decodes.
@@ -128,7 +162,8 @@ fn shrink(img: &DynamicImage, max: u32) -> DynamicImage {
     if img.width().max(img.height()) <= max {
         img.clone()
     } else {
-        img.resize(max, max, image::imageops::FilterType::Triangle)
+        // Area averaging: about twice as fast as a triangle filter, and just as good for shrinking.
+        img.thumbnail(max, max)
     }
 }
 
@@ -167,6 +202,19 @@ mod tests {
         let p = image::open(cache.path("abcdef", Size::Preview)).unwrap();
         assert_eq!((t.width(), t.height()), (341, 512)); // rotated to portrait
         assert_eq!((p.width(), p.height()), (1707, 2560)); // longest edge capped at 2560
+    }
+
+    #[test]
+    fn big_jpegs_decode_scaled_but_not_below_preview_size() {
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("r7.jpg");
+        jpeg(&src, 6960, 4640);
+        let img = jpeg_scaled(&src, 2560).unwrap();
+        assert_eq!((img.width(), img.height()), (3480, 2320)); // half size: still >= 2560 wide
+        let small = d.path().join("s.jpg");
+        jpeg(&small, 800, 600);
+        let img = jpeg_scaled(&small, 2560).unwrap();
+        assert_eq!((img.width(), img.height()), (800, 600));
     }
 
     #[test]

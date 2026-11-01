@@ -95,7 +95,7 @@ fn locate_picks_deepest_volume() {
 fn home_library_found_by_share_and_flagged() {
     let share_dir = tempfile::tempdir().unwrap();
     let c = Catalog::open_in_memory().unwrap();
-    home::configure(&c, "smb://nobara-zd.local/Photos/").unwrap();
+    home::configure(&c, "smb://test-nas.invalid/Photos/").unwrap();
 
     // Not mounted anywhere (and not Windows): not found, nothing breaks.
     #[cfg(not(windows))]
@@ -105,7 +105,7 @@ fn home_library_found_by_share_and_flagged() {
         mount: share_dir.path().to_path_buf(),
         label: Some("photos".into()),
         fs_id: None,
-        network_path: Some(normalize_share(r"\\nobara-zd.local\Photos")),
+        network_path: Some(normalize_share(r"\\test-nas.invalid\Photos")),
         kind: VolumeKind::Network,
         device: None,
     };
@@ -114,4 +114,21 @@ fn home_library_found_by_share_and_flagged() {
     assert_eq!(v.label, "Home Library");
     assert!(share_dir.path().join(MARKER_NAME).exists());
     assert_eq!(c.home_library().unwrap().unwrap().id, v.id);
+}
+
+#[test]
+fn cloud_drives_are_recognised_and_never_written() {
+    assert!(looks_like_cloud(Some("Google Drive"), Some("FAT32")));
+    assert!(looks_like_cloud(Some("OneDrive - Personal"), None));
+    assert!(looks_like_cloud(None, Some("DriveFS")));
+    assert!(!looks_like_cloud(Some("My Passport"), Some("exFAT")));
+
+    let g = tempfile::tempdir().unwrap();
+    std::fs::create_dir(g.path().join("DCIM")).unwrap(); // even with a DCIM folder
+    let c = Catalog::open_in_memory().unwrap();
+    let mut m = mount(g.path(), VolumeKind::Cloud);
+    m.label = Some("Google Drive".into());
+    let v = refresh(&c, &[m]).unwrap();
+    assert_eq!(v[0].kind, VolumeKind::Cloud);
+    assert!(!g.path().join(MARKER_NAME).exists());
 }

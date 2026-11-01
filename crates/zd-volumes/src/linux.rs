@@ -39,10 +39,22 @@ pub(crate) fn parse_mounts(
         };
         let mnt = unescape(mnt);
         let dev = unescape(dev);
-        if !(REAL_FS.contains(&fstype) || NET_FS.contains(&fstype)) || skip_mount(&mnt) {
+        let cloud = fstype.contains("rclone") || fstype == "fuse.onedriver";
+        if !(REAL_FS.contains(&fstype) || NET_FS.contains(&fstype) || cloud) || skip_mount(&mnt) {
             continue;
         }
         let mount = PathBuf::from(&mnt);
+        if cloud {
+            out.push(MountInfo {
+                label: mount.file_name().map(|n| n.to_string_lossy().into_owned()),
+                network_path: None,
+                kind: VolumeKind::Cloud,
+                fs_id: None,
+                device: Some(dev),
+                mount,
+            });
+            continue;
+        }
         if NET_FS.contains(&fstype) {
             out.push(MountInfo {
                 label: dev.rsplit('/').find(|s| !s.is_empty()).map(str::to_string),

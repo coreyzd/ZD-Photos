@@ -48,6 +48,9 @@ pub enum VolumeKind {
     Removable,
     Network,
     Card,
+    /// Google Drive / OneDrive / Dropbox virtual drives: never written to, and only
+    /// scanned when asked (scanning would download every cloud-only file).
+    Cloud,
 }
 
 impl VolumeKind {
@@ -57,6 +60,7 @@ impl VolumeKind {
             VolumeKind::Removable => "removable",
             VolumeKind::Network => "network",
             VolumeKind::Card => "card",
+            VolumeKind::Cloud => "cloud",
         }
     }
     fn parse(s: &str) -> Self {
@@ -64,6 +68,7 @@ impl VolumeKind {
             "removable" => VolumeKind::Removable,
             "network" => VolumeKind::Network,
             "card" => VolumeKind::Card,
+            "cloud" => VolumeKind::Cloud,
             _ => VolumeKind::Internal,
         }
     }
@@ -190,6 +195,19 @@ impl Photo {
             std::cmp::Ordering::Equal => "square",
         })
     }
+}
+
+/// A lightweight row for the library grid.
+#[derive(Debug, Clone, Serialize)]
+pub struct PhotoSummary {
+    pub id: i64,
+    pub fingerprint: String,
+    pub taken_at: Option<String>,
+    pub camera_model: Option<String>,
+    pub is_video: bool,
+    pub duration_ms: Option<u64>,
+    /// At least one copy is on a plugged-in drive right now.
+    pub available: bool,
 }
 
 /// The last-known state of a file on a volume, used to skip unchanged files.
@@ -503,6 +521,41 @@ impl Catalog {
              ORDER BY p.taken_at IS NULL, p.taken_at DESC, p.id DESC LIMIT ?1 OFFSET ?2"
         ))?;
         let rows = st.query_map(params![limit, offset], Photo::from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Everything the library grid needs, in one query, newest first.
+    /// `volume`: only photos with a present file on that drive.
+    pub fn summaries(&self, volume: Option<i64>) -> Result<Vec<PhotoSummary>> {
+        let mut st = self.conn.prepare(
+            "SELECT p.id, p.fingerprint, p.taken_at, p.camera_model, p.mime, p.duration_ms,
+                    EXISTS(SELECT 1 FROM photo_files f JOIN volumes v ON v.id = f.volume_id
+                           WHERE f.photo_id = p.id AND f.missing = 0 AND v.online = 1) AS available
+             FROM photos p
+             WHERE ?1 IS NULL OR EXISTS(SELECT 1 FROM photo_files f
+                                        WHERE f.photo_id = p.id AND f.volume_id = ?1 AND f.missing = 0)
+             ORDER BY p.taken_at IS NULL, p.taken_at DESC, p.id DESC",
+        )?;
+        let rows = st.query_map([volume], |r| {
+            Ok(PhotoSummary {
+                id: r.get(0)?,
+                fingerprint: r.get(1)?,
+                taken_at: r.get(2)?,
+                camera_model: r.get(3)?,
+                is_video: r.get::<_, String>(4)?.starts_with("video/"),
+                duration_ms: r.get::<_, Option<i64>>(5)?.map(|d| d as u64),
+                available: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Number of photos present on each volume: `(volume_id, count)`.
+    pub fn volume_photo_counts(&self) -> Result<Vec<(i64, u64)>> {
+        let mut st = self.conn.prepare(
+            "SELECT volume_id, COUNT(DISTINCT photo_id) FROM photo_files WHERE missing = 0 GROUP BY volume_id",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 

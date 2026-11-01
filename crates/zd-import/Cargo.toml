@@ -12,6 +12,7 @@ zd-volumes.workspace = true
 blake3.workspace = true
 kamadak-exif.workspace = true
 image.workspace = true
+jpeg-decoder.workspace = true
 walkdir.workspace = true
 chrono.workspace = true
 rayon.workspace = true

@@ -158,3 +158,22 @@ fn videos_are_catalogued_with_duration_and_poster() {
     assert_eq!(v.meta.taken_at.as_deref(), Some("2026-05-04T07:12:00"));
     assert!(v.has_thumbnail);
 }
+
+#[test]
+fn cancelled_scan_marks_nothing_missing() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("drive");
+    jpeg(&root.join("a.jpg"), 64, 64, 1);
+    let c = Catalog::open_in_memory().unwrap();
+    let cache = ThumbCache::new(d.path().join("cache"));
+    drive(&c, &root, "DRIVE-1", VolumeKind::Removable);
+    scan(&c, &cache, &root, &mut noop).unwrap();
+
+    std::fs::remove_file(root.join("a.jpg")).unwrap();
+    jpeg(&root.join("b.jpg"), 64, 64, 2);
+    let stop = std::sync::atomic::AtomicBool::new(true);
+    let r = scan_cancellable(&c, &cache, &root, &mut noop, &stop).unwrap();
+    assert!(r.cancelled);
+    assert_eq!((r.new_photos, r.missing), (0, 0));
+    assert_eq!(c.stats().unwrap().files, 1); // a.jpg not flagged by an incomplete scan
+}

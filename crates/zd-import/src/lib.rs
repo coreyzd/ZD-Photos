@@ -17,6 +17,7 @@ pub mod thumbs;
 pub mod video;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 
 use rayon::prelude::*;
@@ -56,6 +57,8 @@ pub struct ScanReport {
     pub thumbnails_made: usize,
     pub missing: usize,
     pub failed: Vec<(PathBuf, String)>,
+    /// Stopped before the end; nothing was marked missing.
+    pub cancelled: bool,
 }
 
 /// The expensive, parallel part of taking in one file.
@@ -152,6 +155,18 @@ pub fn scan(
     folder: &Path,
     progress: &mut dyn FnMut(&Progress),
 ) -> Result<ScanReport> {
+    scan_cancellable(catalog, cache, folder, progress, &AtomicBool::new(false))
+}
+
+/// [`scan`], stopping early (between batches of files) once `cancel` is set.
+/// A stopped scan keeps everything it catalogued but marks nothing missing.
+pub fn scan_cancellable(
+    catalog: &Catalog,
+    cache: &ThumbCache,
+    folder: &Path,
+    progress: &mut dyn FnMut(&Progress),
+    cancel: &AtomicBool,
+) -> Result<ScanReport> {
     let volumes = catalog.volumes()?;
     let folder = std::fs::canonicalize(folder).map_err(|e| Error::Io(folder.to_path_buf(), e))?;
     let (volume, prefix) =
@@ -197,6 +212,10 @@ pub fn scan(
     // Expensive pass, in parallel chunks; each chunk is committed as one transaction.
     let mut done = report.unchanged;
     for chunk in todo.chunks(32) {
+        if cancel.load(Ordering::Relaxed) {
+            report.cancelled = true;
+            return Ok(report);
+        }
         let results: Vec<_> =
             chunk.par_iter().map(|(p, rel)| ingest(p.clone(), rel.clone(), cache)).collect();
         catalog.batch(|c| {

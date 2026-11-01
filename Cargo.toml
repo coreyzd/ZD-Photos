@@ -29,6 +29,7 @@ clap = { version = "4", features = ["derive", "env"] }
 directories = "5"
 tempfile = "3"
 rayon = "1"
+jpeg-decoder = { version = "0.3", default-features = false }
 
 [profile.dev.package."*"]
 # Image decoding is painfully slow unoptimized; optimize dependencies even in debug builds.

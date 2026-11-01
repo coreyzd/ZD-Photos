@@ -163,3 +163,30 @@ fn missing_scoped_to_scanned_folder() {
     assert_eq!(c.mark_unseen_missing(v.id, "2026", &started).unwrap(), 1);
     assert_eq!(c.stats().unwrap().files, 2);
 }
+
+#[test]
+fn summaries_and_counts() {
+    let c = Catalog::open_in_memory().unwrap();
+    let a = c.volume_seen(&sighting("a", "/a")).unwrap();
+    let mut bs = sighting("b", "/b");
+    bs.fs_id = Some("other".into());
+    let b = c.volume_seen(&bs).unwrap();
+    let (p1, _) = c.add_photo("fp1", 1, &meta()).unwrap();
+    c.put_file(p1, a.id, "x.jpg", 1, 1).unwrap();
+    let mut vm = meta();
+    vm.mime = "video/mp4".into();
+    vm.duration_ms = Some(5000);
+    vm.taken_at = Some("2026-06-01T00:00:00".into());
+    let (p2, _) = c.add_photo("fp2", 1, &vm).unwrap();
+    c.put_file(p2, b.id, "v.mp4", 1, 1).unwrap();
+    c.set_volume_online(b.id, false).unwrap();
+
+    let all = c.summaries(None).unwrap();
+    assert_eq!(all.iter().map(|s| s.id).collect::<Vec<_>>(), vec![p2, p1]); // newest first
+    assert!(all[0].is_video && !all[0].available && all[0].duration_ms == Some(5000));
+    assert!(all[1].available);
+    assert_eq!(c.summaries(Some(a.id)).unwrap().len(), 1);
+    let mut counts = c.volume_photo_counts().unwrap();
+    counts.sort();
+    assert_eq!(counts, vec![(a.id, 1), (b.id, 1)]);
+}

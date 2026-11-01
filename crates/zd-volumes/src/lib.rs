@@ -54,6 +54,18 @@ pub fn list_mounts() -> Vec<MountInfo> {
     Vec::new()
 }
 
+/// Virtual drives that sync to a cloud service. Reading a cloud-only file there makes the
+/// service download it, so we never write to them and never scan them uninvited.
+pub fn looks_like_cloud(label: Option<&str>, fs_name: Option<&str>) -> bool {
+    let l = label.unwrap_or("").to_lowercase();
+    let f = fs_name.unwrap_or("").to_lowercase();
+    ["google drive", "googledrive", "onedrive", "dropbox", "icloud", "box drive", "pcloud", "mega"]
+        .iter()
+        .any(|n| l.contains(n))
+        || f == "drivefs"
+        || f.contains("rclone")
+}
+
 /// A camera card has a DCIM folder at its root.
 pub fn is_camera_card(root: &Path) -> bool {
     root.join("DCIM").is_dir()
@@ -78,7 +90,7 @@ pub fn identify(
     allow_marker: bool,
     known_by_fs_id: impl Fn(&str) -> Option<String>,
 ) -> VolumeSighting {
-    let card = is_camera_card(&m.mount);
+    let card = m.kind != VolumeKind::Cloud && is_camera_card(&m.mount);
     let kind = if card { VolumeKind::Card } else { m.kind };
     let default_label = default_label(m, kind);
 
@@ -122,6 +134,7 @@ fn default_label(m: &MountInfo, kind: VolumeKind) -> String {
     }
     match kind {
         VolumeKind::Card => "SD card".into(),
+        VolumeKind::Cloud => "Cloud drive".into(),
         VolumeKind::Network => "Network share".into(),
         VolumeKind::Internal if m.mount == Path::new("/") => "This computer".into(),
         _ => m

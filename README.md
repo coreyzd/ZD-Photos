@@ -4,7 +4,9 @@ A photo organizer and editor for Linux and Windows, built for a hobbyist bird an
 
 Design doc and roadmap: <https://claude.ai/artifact/9D3huBc87zkKkERRYMSVyi>
 
-## Status: Phase 0 — Foundations
+## Status: Phase 1 — Library (in progress)
+
+Phase 0 (foundations) is complete and verified on her Windows laptop. Phase 1 so far: background scanning with progress and Stop, a drives sidebar (photo counts, filter by drive, rename by double-click or right-click), cloud drives (Google Drive, OneDrive, Dropbox) recognised and never written to, and roughly 2× faster thumbnails for large JPEGs.
 
 | Crate | What it does |
 | --- | --- |
@@ -12,7 +14,7 @@ Design doc and roadmap: <https://claude.ai/artifact/9D3huBc87zkKkERRYMSVyi>
 | `zd-volumes` | Recognises drives, network shares and SD cards across unplug/replug and drive-letter changes; finds the Home Library share |
 | `zd-import` | Folder scanning, content fingerprints, EXIF (incl. Canon CR3), thumbnail/preview cache, SD card import with verified copies |
 | `zd-cli` | `zdp`, a command-line tool for exercising the core |
-| `zd-app` | `zd-photos`, the Qt 6 / QML desktop app. Phase 0 shell: dark library grid, resizable thumbnails (slider or Ctrl+wheel), drive status, "Add folder…", offline badges |
+| `zd-app` | `zd-photos`, the Qt 6 / QML desktop app: drives sidebar, resizable thumbnail grid (slider or Ctrl+wheel), background scanning, video and offline badges. `zd-photos --scan <folder>` starts a scan on launch (handy for testing) |
 
 CI (GitHub Actions) lints, tests and builds everything on Linux and Windows, and produces a ready-to-run Windows folder (`zd-photos-windows` artifact) with Qt bundled.
 

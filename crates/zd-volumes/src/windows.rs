@@ -42,6 +42,7 @@ pub(crate) fn list_mounts() -> Vec<MountInfo> {
         }
 
         let mut label = [0u16; 261];
+        let mut fs_name = [0u16; 261];
         let mut serial = 0u32;
         let ok = unsafe {
             GetVolumeInformationW(
@@ -51,8 +52,8 @@ pub(crate) fn list_mounts() -> Vec<MountInfo> {
                 &mut serial,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                0,
+                fs_name.as_mut_ptr(),
+                fs_name.len() as u32,
             )
         };
         if ok == 0 && dtype != DRIVE_REMOTE {
@@ -62,7 +63,10 @@ pub(crate) fn list_mounts() -> Vec<MountInfo> {
         let fs_id = (ok != 0 && dtype != DRIVE_REMOTE)
             .then(|| format!("{:04X}-{:04X}", serial >> 16, serial & 0xFFFF));
 
-        let (kind, network_path) = if dtype == DRIVE_REMOTE {
+        let fs_name = from_wide(&fs_name);
+        let (kind, network_path) = if crate::looks_like_cloud(label.as_deref(), Some(&fs_name)) {
+            (VolumeKind::Cloud, None) // Google Drive for desktop shows up as G:\
+        } else if dtype == DRIVE_REMOTE {
             (VolumeKind::Network, mapped_share(letter))
         } else if dtype == DRIVE_REMOVABLE || !format!("{letter}:").eq_ignore_ascii_case(&system_drive) {
             // USB hard drives report as FIXED; anything that isn't the system drive is treated
