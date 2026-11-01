@@ -25,7 +25,13 @@ enum Cmd {
     /// Detect drives, shares and SD cards and update the catalog.
     Drives,
     /// Set the Home Library network share, e.g. smb://nobara-zd.local/Photos/
-    Home { share: String },
+    Home {
+        share: String,
+        /// On the computer serving the share: the local folder it exports (normally found
+        /// automatically from the Samba config).
+        #[arg(long)]
+        local: Option<PathBuf>,
+    },
     /// Catalogue all photos under a folder (or a whole drive).
     Scan { folder: PathBuf },
     /// Import new photos from an SD card into a folder.
@@ -95,13 +101,15 @@ fn main() -> Result<()> {
                 println!("{:<4} {:<8} {:<10} {:<24} {}", v.id, status, v.kind.as_str(), name, place);
             }
         }
-        Cmd::Home { share } => {
+        Cmd::Home { share, local } => {
             zd_volumes::home::configure(&catalog, &share)?;
+            zd_volumes::home::set_local_path(&catalog, local.as_deref())?;
             refresh(&catalog)?;
             match catalog.home_library()?.filter(|v| v.online) {
                 Some(v) => println!("Home Library connected at {}", v.last_mount.unwrap_or_default()),
                 None => println!(
-                    "Saved. The share isn't reachable right now; mount it (or map it as a drive) and run `zdp drives`."
+                    "Saved, but the share isn't reachable from here yet. Either mount it (fstab cifs \
+                     entry, or kio-fuse for Dolphin), or on the server pass --local /path/it/exports."
                 ),
             }
         }

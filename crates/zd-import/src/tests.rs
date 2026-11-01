@@ -132,3 +132,29 @@ fn dated_folders() {
     assert_eq!(card::dated_folder(None), Path::new("Undated"));
     assert_eq!(card::dated_folder(Some("bad")), Path::new("Undated"));
 }
+
+#[test]
+fn videos_are_catalogued_with_duration_and_poster() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("drive");
+    std::fs::create_dir_all(&root).unwrap();
+    // Canon puts a small JPEG thumbnail in a uuid box; use a real one so the fallback works.
+    let thm = d.path().join("thm.jpg");
+    jpeg(&thm, 160, 90, 5);
+    let mp4 = video::tests::fake_mp4(1_777_878_720, 75, 3840, 2160, &std::fs::read(&thm).unwrap());
+    std::fs::write(root.join("MVI_8486.MP4"), mp4).unwrap();
+
+    let c = Catalog::open_in_memory().unwrap();
+    let cache = ThumbCache::new(d.path().join("cache"));
+    drive(&c, &root, "DRIVE-1", VolumeKind::Removable);
+    let r = scan(&c, &cache, &root, &mut noop).unwrap();
+    assert_eq!(r.new_photos, 1);
+    assert!(r.failed.is_empty(), "{:?}", r.failed);
+
+    let v = &c.photos(1, 0).unwrap()[0];
+    assert!(v.meta.is_video());
+    assert_eq!(v.meta.duration_ms, Some(75_000));
+    assert_eq!((v.meta.width, v.meta.height), (Some(3840), Some(2160)));
+    assert_eq!(v.meta.taken_at.as_deref(), Some("2026-05-04T07:12:00"));
+    assert!(v.has_thumbnail);
+}

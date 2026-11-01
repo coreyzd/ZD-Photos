@@ -6,11 +6,15 @@
 //!   missing, never forgotten.
 //! * [`card`] imports from a camera SD card: copy, verify byte for byte, catalogue,
 //!   and only then offer to clear the card.
+//!
+//! "Photo" throughout includes videos (Canon R7 / Pixel MP4 and MOV): they're catalogued,
+//! fingerprinted, dated and thumbnailed the same way.
 
 pub mod card;
 pub mod fingerprint;
 pub mod metadata;
 pub mod thumbs;
+pub mod video;
 
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;

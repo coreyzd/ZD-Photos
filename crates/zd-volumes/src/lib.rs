@@ -191,31 +191,57 @@ pub mod home {
         catalog.set_setting(SETTING, &normalize_share(share))
     }
 
-    /// Where the configured share can be reached right now, if anywhere: a mounted or mapped
-    /// drive pointing at it, or (on Windows) the UNC path itself.
+    /// Setting key for an explicit local folder that *is* the share (overrides detection).
+    pub const LOCAL_SETTING: &str = "home_library.local_path";
+
+    /// Use this folder as the Home Library on this computer (e.g. the folder Samba exports,
+    /// when this computer is the server).
+    pub fn set_local_path(catalog: &Catalog, path: Option<&Path>) -> zd_catalog::Result<()> {
+        catalog
+            .set_setting(LOCAL_SETTING, &path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default())
+    }
+
+    /// Where the configured share can be reached right now, if anywhere, in this order:
+    /// 1. a folder set explicitly with [`set_local_path`];
+    /// 2. a mounted or mapped drive pointing at it (cifs/fstab, GVfs, Windows mapped drive);
+    /// 3. on the server itself: the folder Samba exports for that share;
+    /// 4. KDE's kio-fuse mount (what Dolphin uses when kio-fuse is installed);
+    /// 5. on Windows, the UNC path itself.
     pub fn find(catalog: &Catalog, mounts: &[MountInfo]) -> zd_catalog::Result<Option<MountInfo>> {
         let Some(share) = catalog.setting(SETTING)? else { return Ok(None) };
-        if let Some(m) = mounts.iter().find(|m| m.network_path.as_deref() == Some(share.as_str())) {
-            return Ok(Some(m.clone()));
-        }
-        Ok(direct_path(&share).filter(|p| p.is_dir()).map(|p| MountInfo {
+        let as_home = |p: PathBuf| MountInfo {
             label: Some("Home Library".into()),
             mount: p,
             fs_id: None,
             network_path: Some(share.clone()),
             kind: VolumeKind::Network,
             device: None,
-        }))
+        };
+        if let Some(local) = catalog.setting(LOCAL_SETTING)?.filter(|s| !s.is_empty()) {
+            let p = PathBuf::from(local);
+            return Ok(p.is_dir().then(|| as_home(p)));
+        }
+        if let Some(m) = mounts.iter().find(|m| m.network_path.as_deref() == Some(share.as_str())) {
+            return Ok(Some(m.clone()));
+        }
+        Ok(candidate_paths(&share).into_iter().find(|p| p.is_dir()).map(as_home))
     }
 
     #[cfg(windows)]
-    fn direct_path(share: &str) -> Option<PathBuf> {
-        Some(PathBuf::from(share.replace('/', "\\")))
+    fn candidate_paths(share: &str) -> Vec<PathBuf> {
+        vec![PathBuf::from(share.replace('/', "\\"))]
     }
 
-    #[cfg(not(windows))]
-    fn direct_path(_share: &str) -> Option<PathBuf> {
-        None
+    #[cfg(target_os = "linux")]
+    fn candidate_paths(share: &str) -> Vec<PathBuf> {
+        let mut out = crate::linux::served_locally(share);
+        out.extend(crate::linux::kio_fuse_paths(share));
+        out
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
+    fn candidate_paths(_share: &str) -> Vec<PathBuf> {
+        Vec::new()
     }
 
     /// Detect the Home Library, record it in the catalog and flag it as home.

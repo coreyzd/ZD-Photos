@@ -72,4 +72,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL
     );
     "#,
+    // v2 — videos (Canon R7 MP4s): duration; `mime` tells photo from video
+    r#"
+    ALTER TABLE photos ADD COLUMN duration_ms INTEGER;
+    "#,
 ];

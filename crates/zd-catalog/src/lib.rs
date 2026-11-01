@@ -126,6 +126,14 @@ pub struct PhotoMeta {
     pub lens: Option<String>,
     pub gps_lat: Option<f64>,
     pub gps_lon: Option<f64>,
+    /// Videos only.
+    pub duration_ms: Option<u64>,
+}
+
+impl PhotoMeta {
+    pub fn is_video(&self) -> bool {
+        self.mime.starts_with("video/")
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,7 +151,7 @@ pub struct Photo {
 
 const PHOTO_COLS: &str = "p.id, p.fingerprint, p.full_hash, p.size, p.mime, p.width, p.height, \
      p.orientation, p.taken_at, p.camera_make, p.camera_model, p.lens, p.gps_lat, p.gps_lon, \
-     p.rating, p.favorite, p.has_thumbnail, p.imported_at";
+     p.rating, p.favorite, p.has_thumbnail, p.imported_at, p.duration_ms";
 
 impl Photo {
     fn from_row(r: &Row) -> rusqlite::Result<Self> {
@@ -163,6 +171,7 @@ impl Photo {
                 lens: r.get(11)?,
                 gps_lat: r.get(12)?,
                 gps_lon: r.get(13)?,
+                duration_ms: r.get::<_, Option<i64>>(18)?.map(|d| d as u64),
             },
             rating: r.get(14)?,
             favorite: r.get(15)?,
@@ -416,8 +425,8 @@ impl Catalog {
         }
         self.conn.execute(
             "INSERT INTO photos (fingerprint, size, mime, width, height, orientation, taken_at,
-                camera_make, camera_model, lens, gps_lat, gps_lon, imported_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                camera_make, camera_model, lens, gps_lat, gps_lon, imported_at, duration_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 fingerprint,
                 size as i64,
@@ -431,7 +440,8 @@ impl Catalog {
                 meta.lens,
                 meta.gps_lat,
                 meta.gps_lon,
-                now()
+                now(),
+                meta.duration_ms.map(|d| d as i64)
             ],
         )?;
         Ok((self.conn.last_insert_rowid(), true))

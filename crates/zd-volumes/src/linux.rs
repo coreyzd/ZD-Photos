@@ -143,17 +143,7 @@ fn is_usb(devpath: &Path) -> bool {
 /// Shares mounted through the file manager (Dolphin/KIO uses `smb://` URLs directly,
 /// GNOME uses GVfs under the runtime dir).
 fn gvfs_mounts() -> Vec<MountInfo> {
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        let uid = fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find(|l| l.starts_with("Uid:"))
-                    .and_then(|l| l.split_whitespace().nth(1).map(str::to_string))
-            })
-            .unwrap_or_else(|| "1000".into());
-        PathBuf::from("/run/user").join(uid)
-    });
+    let runtime = runtime_dir();
     let mut out = Vec::new();
     if let Ok(rd) = fs::read_dir(runtime.join("gvfs")) {
         for e in rd.flatten() {
@@ -188,6 +178,114 @@ pub(crate) fn parse_gvfs_name(name: &str) -> Option<String> {
     Some(normalize_share(&format!("//{}/{}", server?, share?)))
 }
 
+/// If this computer is the server for `//host/share`, the local folder Samba exports for it.
+/// Looks at `smb.conf` shares and at usershares (what Dolphin's "Share" tab creates).
+pub(crate) fn served_locally(share: &str) -> Vec<PathBuf> {
+    let Some((host, name)) = split_share(share) else { return Vec::new() };
+    let me = fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+    if !is_this_host(&host, &me) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if let Ok(conf) = fs::read_to_string("/etc/samba/smb.conf") {
+        out.extend(smb_conf_path(&conf, &name));
+    }
+    if let Ok(rd) = fs::read_dir("/var/lib/samba/usershares") {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().eq_ignore_ascii_case(&name) {
+                if let Ok(text) = fs::read_to_string(e.path()) {
+                    out.extend(usershare_path(&text));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// KDE's kio-fuse exposes `smb://host/share` at `$XDG_RUNTIME_DIR/kio-fuse-XXXX/smb/host/share`.
+pub(crate) fn kio_fuse_paths(share: &str) -> Vec<PathBuf> {
+    let Some((host, name)) = split_share(share) else { return Vec::new() };
+    let mut out = Vec::new();
+    let Ok(rd) = fs::read_dir(runtime_dir()) else { return out };
+    for e in rd.flatten() {
+        if !e.file_name().to_string_lossy().starts_with("kio-fuse-") {
+            continue;
+        }
+        let Ok(hosts) = fs::read_dir(e.path().join("smb")) else { continue };
+        for h in hosts.flatten() {
+            if !h.file_name().to_string_lossy().eq_ignore_ascii_case(&host) {
+                continue;
+            }
+            if let Ok(shares) = fs::read_dir(h.path()) {
+                out.extend(
+                    shares
+                        .flatten()
+                        .filter(|s| s.file_name().to_string_lossy().eq_ignore_ascii_case(&name))
+                        .map(|s| s.path()),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// `//nobara-zd.local/photos` -> (`nobara-zd.local`, `photos`)
+fn split_share(share: &str) -> Option<(String, String)> {
+    let rest = share.strip_prefix("//")?;
+    let (host, name) = rest.split_once('/')?;
+    let name = name.split('/').next()?;
+    (!host.is_empty() && !name.is_empty()).then(|| (host.to_string(), name.to_string()))
+}
+
+fn is_this_host(host: &str, me: &str) -> bool {
+    let host = host.trim().to_lowercase();
+    let host = host.strip_suffix(".local").unwrap_or(&host);
+    let me = me.trim().to_lowercase();
+    let me = me.split('.').next().unwrap_or("");
+    host == "localhost" || host == "127.0.0.1" || (!me.is_empty() && host == me)
+}
+
+/// The `path =` of section `[name]` in smb.conf (case-insensitive, as Samba treats it).
+fn smb_conf_path(conf: &str, name: &str) -> Option<PathBuf> {
+    let mut in_section = false;
+    for line in conf.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.starts_with(';') || line.is_empty() {
+            continue;
+        }
+        if let Some(sec) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            in_section = sec.trim().eq_ignore_ascii_case(name);
+            continue;
+        }
+        if in_section {
+            if let Some((k, v)) = line.split_once('=') {
+                if k.trim().eq_ignore_ascii_case("path") {
+                    return Some(PathBuf::from(v.trim()));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn usershare_path(text: &str) -> Option<PathBuf> {
+    text.lines().find_map(|l| l.strip_prefix("path=")).map(|p| PathBuf::from(p.trim()))
+}
+
+fn runtime_dir() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| {
+        let uid = fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("Uid:"))
+                    .and_then(|l| l.split_whitespace().nth(1).map(str::to_string))
+            })
+            .unwrap_or_else(|| "1000".into());
+        PathBuf::from("/run/user").join(uid)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +318,22 @@ tmpfs /run/user/1000 tmpfs rw 0 0
             Some("//nobara-zd.local/photos")
         );
         assert_eq!(parse_gvfs_name("mtp:host=Google_Pixel"), None);
+    }
+
+    #[test]
+    fn finds_share_folders() {
+        let conf = "[global]\n   workgroup = WORKGROUP\n\n[Photos]\n   path = /mnt/plex-hdd1/Photos\n   read only = no\n[other]\npath=/x\n";
+        assert_eq!(smb_conf_path(conf, "photos"), Some(PathBuf::from("/mnt/plex-hdd1/Photos")));
+        assert_eq!(smb_conf_path(conf, "missing"), None);
+        let us = "#VERSION 2\npath=/run/media/coreyzd/plex-hdd1/Photos\ncomment=\nusershare_acl=Everyone:F,\nguest_ok=n\nsharename=Photos\n";
+        assert_eq!(usershare_path(us), Some(PathBuf::from("/run/media/coreyzd/plex-hdd1/Photos")));
+        assert_eq!(
+            split_share("//nobara-zd.local/photos"),
+            Some(("nobara-zd.local".into(), "photos".into()))
+        );
+        assert!(is_this_host("nobara-zd.local", "nobara-zd\n"));
+        assert!(is_this_host("NOBARA-ZD", "nobara-zd"));
+        assert!(!is_this_host("other.local", "nobara-zd"));
     }
 
     #[test]

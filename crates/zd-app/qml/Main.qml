@@ -124,6 +124,26 @@ ApplicationWindow {
                     opacity: library.isOffline(index) ? 0.55 : 1.0
                 }
 
+                // Videos: play mark + length, bottom-left like Google Photos.
+                Rectangle {
+                    readonly property string len: library.duration(index)
+                    visible: len !== ""
+                    anchors.left: parent.left
+                    anchors.bottom: parent.bottom
+                    anchors.margins: 6
+                    width: videoText.implicitWidth + 12
+                    height: 20
+                    radius: 10
+                    color: "#cc000000"
+                    Label {
+                        id: videoText
+                        anchors.centerIn: parent
+                        text: "\u25B6 " + parent.len
+                        color: win.ink
+                        font.pixelSize: 11
+                    }
+                }
+
                 // Drive unplugged: still browsable, marked like Google Photos' backup badges.
                 Rectangle {
                     visible: library.isOffline(index)

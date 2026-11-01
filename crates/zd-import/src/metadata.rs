@@ -19,6 +19,8 @@ pub fn media_type(path: &Path) -> Option<&'static str> {
         "cr3" => "image/x-canon-cr3",
         "cr2" => "image/x-canon-cr2",
         "dng" => "image/x-adobe-dng",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
         _ => return None,
     })
 }
@@ -32,8 +34,11 @@ pub fn is_raw(mime: &str) -> bool {
 pub fn read_meta(path: &Path, mime: &str) -> PhotoMeta {
     let mut meta = PhotoMeta { mime: mime.to_string(), orientation: 1, ..Default::default() };
 
-    let exif = if mime == "image/x-canon-cr3" {
-        read_cr3_exif(path)
+    let video = mime.starts_with("video/").then(|| crate::video::probe(path).unwrap_or_default());
+    let exif = if let Some(v) = &video {
+        canon_exif(&v.meta_bytes)
+    } else if mime == "image/x-canon-cr3" {
+        read_head(path, 512 * 1024).map(|b| canon_exif(&b)).unwrap_or_default()
     } else {
         File::open(path)
             .ok()
@@ -62,6 +67,7 @@ pub fn read_meta(path: &Path, mime: &str) -> PhotoMeta {
         .or_else(|| text(Tag::DateTimeDigitized))
         .or_else(|| text(Tag::DateTime))
         .and_then(|s| exif_date(&s))
+        .or_else(|| video.as_ref().and_then(|v| v.created.clone()))
         .or_else(|| file_time(path));
     meta.camera_make = text(Tag::Make);
     meta.camera_model = text(Tag::Model);
@@ -69,7 +75,12 @@ pub fn read_meta(path: &Path, mime: &str) -> PhotoMeta {
     meta.orientation = uint(Tag::Orientation).filter(|o| (1..=8).contains(o)).unwrap_or(1) as u16;
     meta.width = uint(Tag::PixelXDimension).or_else(|| uint(Tag::ImageWidth));
     meta.height = uint(Tag::PixelYDimension).or_else(|| uint(Tag::ImageLength));
-    if !is_raw(mime) {
+    if let Some(v) = &video {
+        // The container's frame size and length are the truth for videos.
+        meta.width = v.width.or(meta.width);
+        meta.height = v.height.or(meta.height);
+        meta.duration_ms = v.duration_ms;
+    } else if !is_raw(mime) {
         // The image header is the truth for dimensions; EXIF can be stale after edits.
         if let Ok((w, h)) = image::image_dimensions(path) {
             meta.width = Some(w);
@@ -115,11 +126,10 @@ fn file_time(path: &Path) -> Option<String> {
 
 /// Canon CR3 is an ISO media container; its EXIF lives in `CMT1` (main IFD: make, model)
 /// and `CMT2` (Exif IFD: dates, lens) boxes, each a small TIFF.
-fn read_cr3_exif(path: &Path) -> Vec<exif::Exif> {
-    let Ok(bytes) = read_head(path, 512 * 1024) else { return Vec::new() };
+fn canon_exif(bytes: &[u8]) -> Vec<exif::Exif> {
     let mut out = Vec::new();
     for name in [b"CMT1", b"CMT2", b"CMT4"] {
-        if let Some(tiff) = find_box(&bytes, name) {
+        if let Some(tiff) = find_box(bytes, name) {
             if let Ok(e) = Reader::new().read_raw(tiff.to_vec()) {
                 out.push(e);
             }

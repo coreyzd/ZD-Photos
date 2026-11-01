@@ -53,7 +53,17 @@ zdp card --to ~/Pictures/R7                    # copy + verify + catalogue
 zdp stats
 ```
 
-On Linux the Home Library is found when the share is mounted (Dolphin/KIO, GVfs, or a `cifs` entry in fstab). On Windows it's found through a mapped drive or directly at `\\nobara-zd.local\Photos`.
+How the Home Library is found:
+
+- **On the computer serving the share** (nobara-zd): from Samba's config, i.e. the `path =` of the `[Photos]` section in `/etc/samba/smb.conf`, or the usershare Dolphin's *Share* tab created. If that can't be read, point at the exported folder yourself: `zdp home smb://nobara-zd.local/Photos/ --local /path/to/Photos`.
+- **Other Linux machines:** when the share is mounted as a real folder: a `cifs` entry in fstab, GNOME/GVfs, or KDE with `kio-fuse` installed. Dolphin's own `smb://` browsing isn't a mount other programs can use.
+- **Windows:** through a mapped drive, or directly at `\\nobara-zd.local\Photos`; no mapping needed.
+
+Either way it's the same Home Library: the hidden marker file in the share's top folder ties them together.
+
+## Videos
+
+Videos from the R7 (and the Pixel) are catalogued like photos: MP4, M4V and MOV, with capture date, length, frame size and camera details. The grid shows a poster frame with a ▶ length badge. Poster frames come from `ffmpeg` when it's installed (Nobara ships it); otherwise from the small thumbnail Canon embeds in each video. Playback arrives in Phase 1.
 
 ## Known limits in Phase 0
 

@@ -37,6 +37,10 @@ pub mod qobject {
         #[qinvokable]
         fn caption(self: &Library, index: i32) -> QString;
 
+        /// "1:15" for videos, empty for photos.
+        #[qinvokable]
+        fn duration(self: &Library, index: i32) -> QString;
+
         #[qinvokable]
         #[cxx_name = "isOffline"]
         fn is_offline(self: &Library, index: i32) -> bool;
@@ -54,7 +58,19 @@ use zd_import::{Size, ThumbCache};
 struct Item {
     thumb: String,
     caption: String,
+    duration: String,
     offline: bool,
+}
+
+/// 75_000 ms -> "1:15"; 3_725_000 -> "1:02:05"
+fn clock(ms: u64) -> String {
+    let s = ms / 1000;
+    let (h, m, s) = (s / 3600, (s / 60) % 60, s % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
 }
 
 pub struct LibraryRust {
@@ -147,6 +163,11 @@ impl qobject::Library {
                 items.push(Item {
                     thumb: file_url(&rust.cache.path(&p.fingerprint, Size::Thumb)),
                     caption: caption.join(" · "),
+                    duration: if p.meta.is_video() {
+                        clock(p.meta.duration_ms.unwrap_or(0))
+                    } else {
+                        String::new()
+                    },
                     offline,
                 });
             }
@@ -217,6 +238,10 @@ impl qobject::Library {
         self.item(index).map(|i| QString::from(&i.caption)).unwrap_or_default()
     }
 
+    pub fn duration(&self, index: i32) -> QString {
+        self.item(index).map(|i| QString::from(&i.duration)).unwrap_or_default()
+    }
+
     pub fn is_offline(&self, index: i32) -> bool {
         self.item(index).is_some_and(|i| i.offline)
     }
@@ -253,6 +278,8 @@ mod tests {
     fn helpers() {
         assert_eq!(pretty_date("2026-05-04T07:12:00"), "May 4, 2026");
         assert_eq!(pretty_date("junk"), "");
+        assert_eq!(clock(75_000), "1:15");
+        assert_eq!(clock(3_725_000), "1:02:05");
         assert_eq!(percent_decode("/run/media/c/My%20Passport"), "/run/media/c/My Passport");
         assert_eq!(file_url(std::path::Path::new("/a/b.jpg")), "file:///a/b.jpg");
     }

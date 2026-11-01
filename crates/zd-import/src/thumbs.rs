@@ -82,6 +82,10 @@ impl ThumbCache {
 }
 
 fn decode(src: &Path, mime: &str) -> Result<DynamicImage, String> {
+    if mime.starts_with("video/") {
+        return crate::video::poster(src)
+            .ok_or_else(|| "no poster frame (install ffmpeg for video frames)".into());
+    }
     if is_raw(mime) {
         return embedded_jpeg(src).ok_or_else(|| "no embedded preview in RAW file".to_string());
     }
@@ -98,7 +102,11 @@ fn decode(src: &Path, mime: &str) -> Result<DynamicImage, String> {
 /// RAW files (CR3, CR2, DNG) carry JPEG previews. Pick the largest one that decodes.
 /// Full RAW development (LibRaw) comes with the editor in Phase 2.
 fn embedded_jpeg(src: &Path) -> Option<DynamicImage> {
-    let bytes = read_head(src, 64 * 1024 * 1024).ok()?;
+    largest_jpeg_in(&read_head(src, 64 * 1024 * 1024).ok()?)
+}
+
+/// The largest JPEG that decodes from inside a byte buffer (RAW previews, Canon video `CNTH`).
+pub(crate) fn largest_jpeg_in(bytes: &[u8]) -> Option<DynamicImage> {
     let mut best: Option<DynamicImage> = None;
     let mut tries = 0;
     let mut i = 0;
