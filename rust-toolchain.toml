@@ -1,0 +1,5 @@
+[toolchain]
+# Same compiler (and lints) everywhere: your machine, CI, and Claude's workspace.
+# Bump deliberately, then fix any new clippy warnings in the same commit.
+channel = "1.99"
+components = ["clippy", "rustfmt"]
