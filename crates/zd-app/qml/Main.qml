@@ -108,7 +108,7 @@ ApplicationWindow {
         property string kind: ""
         property bool online: false
         MenuItem {
-            text: "Rename…"
+            text: "Rename\u2026"
             onTriggered: renameDialog.openFor(driveMenu.volumeId, driveMenu.label)
         }
         MenuItem {
@@ -154,7 +154,7 @@ ApplicationWindow {
                 onClicked: library.refresh()
             }
             Button {
-                text: "Add folder…"
+                text: "Add folder\u2026"
                 enabled: !library.scanning
                 onClicked: folderDialog.open()
             }
@@ -180,7 +180,7 @@ ApplicationWindow {
             Label {
                 visible: library.scanning
                 text: library.progressPhase === "finding"
-                    ? "Looking for photos… " + library.progressDone.toLocaleString(Qt.locale(), "f", 0) + " found"
+                    ? "Looking for photos\u2026 " + library.progressDone.toLocaleString(Qt.locale(), "f", 0) + " found"
                     : library.progressPhase === "checking"
                     ? "Checking photos already in your library: " + library.progressDone.toLocaleString(Qt.locale(), "f", 0)
                       + " of " + library.progressTotal.toLocaleString(Qt.locale(), "f", 0)
@@ -232,7 +232,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     Layout.leftMargin: 8
                     Layout.rightMargin: 8
-                    glyph: "▦"
+                    glyph: "\u25A6"
                     label: "All photos"
                     selected: library.selectedVolume === -1
                     online: true
@@ -265,8 +265,8 @@ ApplicationWindow {
                         readonly property string kind: library.volumeKind(index)
                         x: 8
                         width: driveList.width - 16
-                        glyph: kind === "home" ? "⌂" : kind === "cloud" ? "☁" : kind === "card" ? "▣"
-                             : kind === "network" ? "⇄" : kind === "internal" ? "▤" : "▭"
+                        glyph: kind === "home" ? "\u2302" : kind === "cloud" ? "\u2601" : kind === "card" ? "\u25A3"
+                             : kind === "network" ? "\u21C4" : kind === "internal" ? "\u25A4" : "\u25AD"
                         label: library.volumeLabel(index)
                         detail: library.volumePhotos(index) > 0 ? library.volumePhotos(index).toLocaleString(Qt.locale(), "f", 0) : ""
                         online: library.volumeOnline(index)
@@ -356,7 +356,7 @@ ApplicationWindow {
                         Label {
                             id: videoText
                             anchors.centerIn: parent
-                            text: "▶ " + parent.len
+                            text: "\u25B6 " + parent.len
                             color: win.ink
                             font.pixelSize: 11
                         }

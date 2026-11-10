@@ -65,6 +65,26 @@ How the Home Library is found:
 
 Either way it's the same Home Library: the hidden marker file in the share's top folder ties them together.
 
+### The Home Library's shared cache
+
+Making a thumbnail means reading the whole photo, which over Wi-Fi is slow (~10 MB per R7 JPEG). So the Home Library carries a shared cache in a hidden `.zdphotos` folder at the share's root: thumbnails, previews, and `index.jsonl` (each file's path, size, date, fingerprint and metadata). Samba hides dot-folders from Windows by default.
+
+- **nobara-zd** (the computer serving the share) fills it whenever it scans the Home Library, from its local disk.
+- **Every other computer** looks each file up in the index by path, size and date. On a match it copies the ~50 KB thumbnail and never opens the photo. Anything new or edited is read normally and added to the cache for next time.
+
+Keep it current automatically on nobara-zd with the systemd timer in `packaging/linux/`:
+
+```sh
+cargo install --path crates/zd-cli            # installs zdp into ~/.cargo/bin
+mkdir -p ~/.config/systemd/user
+cp packaging/linux/zdphotos-share.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now zdphotos-share.timer
+systemctl --user start zdphotos-share.service  # first run now (watch: journalctl --user -fu zdphotos-share)
+```
+
+Or by hand: `zdp scan-home`.
+
 ## Videos
 
 Videos from the R7 (and the Pixel) are catalogued like photos: MP4, M4V and MOV, with capture date, length, frame size and camera details. The grid shows a poster frame with a ▶ length badge. Poster frames come from `ffmpeg` when it's installed (Nobara ships it); otherwise from the small thumbnail Canon embeds in each video. Playback arrives in Phase 1.

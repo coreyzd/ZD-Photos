@@ -12,7 +12,7 @@ use std::path::Path;
 
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Row};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub use rusqlite;
 
@@ -119,7 +119,8 @@ impl Volume {
 // ----------------------------------------------------------------- photos ---
 
 /// Metadata read from a file (EXIF and image header).
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PhotoMeta {
     pub mime: String,
     pub width: Option<u32>,

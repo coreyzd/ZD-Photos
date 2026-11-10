@@ -10,24 +10,67 @@ const CHUNK: u64 = 1024 * 1024;
 /// Fast fingerprint: BLAKE3 over the file size, the first MiB and the last MiB.
 /// Reads at most 2 MiB, so scanning a network share stays quick.
 pub fn fingerprint(path: &Path) -> io::Result<(String, u64)> {
-    let mut f = File::open(path)?;
-    let size = f.metadata()?.len();
-    let mut h = blake3::Hasher::new();
-    h.update(b"zdfp1");
-    h.update(&size.to_le_bytes());
+    let ht = read_head_tail(path)?;
+    Ok((ht.fingerprint(), ht.size))
+}
 
-    let mut buf = vec![0u8; CHUNK as usize];
-    let n = read_up_to(&mut f, &mut buf)?;
-    h.update(&buf[..n]);
+/// The start and end of a file, read through one open handle (each open costs several
+/// round trips on a network share).
+pub struct HeadTail {
+    pub size: u64,
+    /// The first MiB (or the whole file if smaller).
+    pub head: Vec<u8>,
+    /// The bytes the fingerprint uses after `head`: the last MiB for big files, the rest
+    /// for files between 1 and 2 MiB, nothing for small ones.
+    pub tail: Vec<u8>,
+    file: File,
+}
+
+pub fn read_head_tail(path: &Path) -> io::Result<HeadTail> {
+    let mut file = File::open(path)?;
+    let size = file.metadata()?.len();
+    let mut head = vec![0u8; CHUNK.min(size) as usize];
+    let n = read_up_to(&mut file, &mut head)?;
+    head.truncate(n);
+    let mut tail = Vec::new();
     if size > 2 * CHUNK {
-        f.seek(SeekFrom::Start(size - CHUNK))?;
-        let n = read_up_to(&mut f, &mut buf)?;
-        h.update(&buf[..n]);
+        file.seek(SeekFrom::Start(size - CHUNK))?;
+        tail.resize(CHUNK as usize, 0);
+        let n = read_up_to(&mut file, &mut tail)?;
+        tail.truncate(n);
     } else if size > CHUNK {
-        let n = read_up_to(&mut f, &mut buf)?; // the rest, no overlap
-        h.update(&buf[..n]);
+        file.read_to_end(&mut tail)?;
     }
-    Ok((h.finalize().to_hex().to_string(), size))
+    Ok(HeadTail { size, head, tail, file })
+}
+
+impl HeadTail {
+    pub fn fingerprint(&self) -> String {
+        let mut h = blake3::Hasher::new();
+        h.update(b"zdfp1");
+        h.update(&self.size.to_le_bytes());
+        h.update(&self.head);
+        h.update(&self.tail);
+        h.finalize().to_hex().to_string()
+    }
+
+    /// The whole file, reusing what's already been read: one more sequential read at most.
+    pub fn into_full(mut self) -> io::Result<Vec<u8>> {
+        let head_len = self.head.len() as u64;
+        if head_len >= self.size {
+            return Ok(self.head);
+        }
+        if self.size <= 2 * CHUNK {
+            let mut all = self.head;
+            all.extend_from_slice(&self.tail);
+            return Ok(all);
+        }
+        let mut all = self.head;
+        all.reserve((self.size - head_len) as usize);
+        self.file.seek(SeekFrom::Start(head_len))?;
+        self.file.read_to_end(&mut all)?;
+        Ok(all)
+    }
 }
 
 /// BLAKE3 of the whole file. Used to verify copies byte for byte.
@@ -70,6 +113,19 @@ mod tests {
         std::fs::write(d.path().join("c.jpg"), &changed).unwrap();
         assert_ne!(fingerprint(&d.path().join("c.jpg")).unwrap().0, a);
         assert_ne!(full_hash(&d.path().join("c.jpg")).unwrap(), full_hash(&d.path().join("a.jpg")).unwrap());
+    }
+
+    #[test]
+    fn head_tail_reassembles_the_whole_file() {
+        let d = tempfile::tempdir().unwrap();
+        for len in [0usize, 10, 1_500_000, 3_000_000] {
+            let p = d.path().join(format!("{len}.bin"));
+            let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            std::fs::write(&p, &data).unwrap();
+            let ht = read_head_tail(&p).unwrap();
+            assert_eq!(ht.fingerprint(), fingerprint(&p).unwrap().0);
+            assert_eq!(ht.into_full().unwrap(), data, "len {len}");
+        }
     }
 
     #[test]

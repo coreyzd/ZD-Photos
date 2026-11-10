@@ -13,9 +13,11 @@
 pub mod card;
 pub mod fingerprint;
 pub mod metadata;
+pub mod shared;
 pub mod thumbs;
 pub mod video;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
@@ -67,6 +69,10 @@ pub struct ScanReport {
     /// Known photos found in a new place (moved, renamed, or a backup copy).
     pub new_locations: usize,
     pub thumbnails_made: usize,
+    /// Thumbnails copied from the Home Library's shared cache instead of being made.
+    pub thumbnails_from_share: usize,
+    /// Files recognised from the shared index without being opened.
+    pub index_hits: usize,
     pub missing: usize,
     pub failed: Vec<(PathBuf, String)>,
     /// Stopped before the end; nothing was marked missing.
@@ -82,6 +88,10 @@ struct Ingested {
     fingerprint: String,
     meta: PhotoMeta,
     thumb: std::result::Result<bool, String>,
+    /// Fingerprint and metadata came from the shared index; the file wasn't opened.
+    from_index: bool,
+    /// The thumbnail was copied from the shared cache.
+    thumb_from_share: bool,
 }
 
 fn mtime(md: &std::fs::Metadata) -> i64 {
@@ -93,21 +103,94 @@ fn mtime(md: &std::fs::Metadata) -> i64 {
 }
 
 fn ingest(
-    path: PathBuf,
+    f: &Found,
     rel: String,
     cache: &ThumbCache,
+    shared: Option<&shared::SharedCache>,
 ) -> std::result::Result<Ingested, (PathBuf, String)> {
+    let path = f.path.clone();
     let fail = |e: String| (path.clone(), e);
     let mime = metadata::media_type(&path).ok_or_else(|| fail("not a photo".into()))?;
-    let md = std::fs::metadata(&path).map_err(|e| fail(e.to_string()))?;
-    let (fingerprint, size) = fingerprint::fingerprint(&path).map_err(|e| fail(e.to_string()))?;
+
+    // Home Library: known to the shared index with the same size and date? Then we already
+    // know its fingerprint and metadata, and can copy its thumbnail: no need to open it.
+    if let Some(e) = shared.and_then(|s| s.lookup(&rel, f.size, f.modified)) {
+        let local_had = cache.has_thumb(&e.fingerprint);
+        let copied = !local_had && shared.is_some_and(|s| s.fetch(&e.fingerprint, cache, false));
+        if local_had || copied {
+            return Ok(Ingested {
+                modified: f.modified,
+                size: f.size,
+                fingerprint: e.fingerprint.clone(),
+                meta: e.meta.clone(),
+                thumb: Ok(copied),
+                from_index: true,
+                thumb_from_share: copied,
+                path,
+                rel,
+            });
+        }
+    }
+
+    let mut it = read_and_ingest(f, rel, mime, cache).map_err(fail)?;
+    if let (Some(s), Ok(_)) = (shared, &it.thumb) {
+        s.publish(&it.fingerprint, cache);
+    }
+    it.from_index = false;
+    Ok(it)
+}
+
+/// Read the file itself: fingerprint, metadata, and a thumbnail if the local cache lacks one.
+fn read_and_ingest(
+    f: &Found,
+    rel: String,
+    mime: &str,
+    cache: &ThumbCache,
+) -> std::result::Result<Ingested, String> {
+    let path = f.path.clone();
+    let done = |fingerprint: String, size: u64, meta: PhotoMeta, thumb| Ingested {
+        modified: f.modified,
+        size,
+        fingerprint,
+        meta,
+        thumb,
+        from_index: false,
+        thumb_from_share: false,
+        path: path.clone(),
+        rel: rel.clone(),
+    };
+
+    // Plain images: open the file once. The first and last MiB give the fingerprint and the
+    // EXIF; the rest is read (in one go) only if a thumbnail still has to be made. On a
+    // network share this is several times fewer round trips than opening the file per step.
+    if matches!(mime, "image/jpeg" | "image/png" | "image/webp" | "image/tiff") {
+        let ht = fingerprint::read_head_tail(&path).map_err(|e| e.to_string())?;
+        let (fingerprint, size) = (ht.fingerprint(), ht.size);
+        let mut meta = metadata::read_meta_from(&path, mime, &ht.head);
+        if meta.taken_at.is_none() {
+            meta.taken_at = metadata::unix_to_local_string(f.modified);
+        }
+        let thumb = if cache.has_thumb(&fingerprint) {
+            Ok(false)
+        } else {
+            match ht.into_full() {
+                Ok(bytes) => {
+                    cache.generate_from_bytes(&bytes, &fingerprint, mime, meta.orientation).map(|_| true)
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        };
+        return Ok(done(fingerprint, size, meta, thumb));
+    }
+
+    let (fingerprint, size) = fingerprint::fingerprint(&path).map_err(|e| e.to_string())?;
     let meta = metadata::read_meta(&path, mime);
-    let thumb = if cache.has(&fingerprint) {
+    let thumb = if cache.has_thumb(&fingerprint) {
         Ok(false)
     } else {
         cache.generate(&path, &fingerprint, mime, meta.orientation).map(|_| true)
     };
-    Ok(Ingested { modified: mtime(&md), path, rel, size, fingerprint, meta, thumb })
+    Ok(done(fingerprint, size, meta, thumb))
 }
 
 /// Write one ingested file to the catalog. Returns (new_photo, thumbnail_made).
@@ -117,6 +200,9 @@ fn record(
     it: &Ingested,
     report: &mut ScanReport,
 ) -> zd_catalog::Result<i64> {
+    if it.from_index {
+        report.index_hits += 1;
+    }
     let (photo_id, created) = catalog.add_photo(&it.fingerprint, it.size, &it.meta)?;
     let previously_here = catalog.file_record(volume.id, &it.rel)?.map(|r| r.photo_id);
     catalog.put_file(photo_id, volume.id, &it.rel, it.size, it.modified)?;
@@ -128,7 +214,9 @@ fn record(
     match &it.thumb {
         Ok(made) => {
             catalog.set_has_thumbnail(photo_id, true)?;
-            if *made {
+            if it.thumb_from_share {
+                report.thumbnails_from_share += 1;
+            } else if *made {
                 report.thumbnails_made += 1;
             }
         }
@@ -151,17 +239,31 @@ pub fn find_media(folder: &Path) -> Vec<PathBuf> {
     find_media_with(folder, &mut |_, _| true)
 }
 
+/// A photo file found while listing a folder, with the size and date the listing already
+/// reported (on Windows that costs no extra trip to a network share).
+#[derive(Debug, Clone)]
+pub struct Found {
+    pub path: PathBuf,
+    pub size: u64,
+    pub modified: i64,
+}
+
 /// [`find_media`], calling `on_file(count_so_far, path)` for each file found; stops early
 /// (returning what it has) when `on_file` returns false.
 pub fn find_media_with(folder: &Path, on_file: &mut dyn FnMut(usize, &Path) -> bool) -> Vec<PathBuf> {
-    let mut out = Vec::new();
+    find_media_files(folder, on_file).into_iter().map(|f| f.path).collect()
+}
+
+pub fn find_media_files(folder: &Path, on_file: &mut dyn FnMut(usize, &Path) -> bool) -> Vec<Found> {
+    let mut out: Vec<Found> = Vec::new();
     let walk = walkdir::WalkDir::new(folder).follow_links(false).into_iter().filter_entry(|e| {
         e.depth() == 0 || !(e.file_type().is_dir() && skip_dir(&e.file_name().to_string_lossy()))
     });
     for e in walk.filter_map(|e| e.ok()) {
         if e.file_type().is_file() && metadata::media_type(e.path()).is_some() {
-            out.push(e.into_path());
-            if !on_file(out.len(), out.last().map(PathBuf::as_path).unwrap_or(folder)) {
+            let Ok(md) = e.metadata() else { continue };
+            out.push(Found { size: md.len(), modified: mtime(&md), path: e.into_path() });
+            if !on_file(out.len(), out.last().map(|f| f.path.as_path()).unwrap_or(folder)) {
                 break;
             }
         }
@@ -195,7 +297,17 @@ pub fn scan_cancellable(
     let volume = volume.clone();
     let started = zd_catalog::timestamp();
 
-    let files = find_media_with(&folder, &mut |found, path| {
+    // The Home Library carries a shared thumbnail cache and index (see `shared`).
+    let mut shared = volume
+        .is_home_library
+        .then(|| volume.last_mount.as_deref().and_then(|m| shared::SharedCache::open(Path::new(m))))
+        .flatten();
+    // The computer serving the share reads its files fast, so it fills the shared cache with
+    // everything it already knows. Other computers only add what they had to read anyway.
+    let backfill =
+        shared.as_ref().is_some_and(|s| s.writable()) && zd_volumes::home::served_here(catalog, &volume);
+
+    let files = find_media_files(&folder, &mut |found, path| {
         if found % 200 == 0 {
             progress(&Progress { phase: Phase::Finding, done: found, total: 0, current: path.to_path_buf() });
         }
@@ -215,31 +327,48 @@ pub fn scan_cancellable(
             format!("{prefix}/{r}")
         }
     };
+    let mut seen: HashSet<String> = HashSet::with_capacity(files.len());
 
-    // Cheap pass: skip what hasn't changed since last time. Committed every 500 files so the
-    // UI sees progress and a Stop takes effect quickly.
-    let mut todo = Vec::new();
+    // Cheap pass: skip what hasn't changed since last time, using the size and date from the
+    // listing (no extra round trip per file). Committed every 500 files so the UI sees
+    // progress and a Stop takes effect quickly.
+    let mut todo: Vec<(Found, String)> = Vec::new();
     for (n, batch) in files.chunks(500).enumerate() {
         if cancel.load(Ordering::Relaxed) {
             report.cancelled = true;
+            save_shared(&mut shared);
             return Ok(report);
         }
         catalog.batch(|c| {
-            for path in batch {
-                let rel = rel_of(path);
-                let unchanged = match (c.file_record(volume.id, &rel)?, std::fs::metadata(path)) {
-                    (Some(rec), Ok(md)) => {
-                        rec.size == md.len()
-                            && rec.modified == mtime(&md)
-                            && c.photo(rec.photo_id)?.is_some_and(|p| p.has_thumbnail)
+            for f in batch {
+                let rel = rel_of(&f.path);
+                seen.insert(rel.clone());
+                let known = match c.file_record(volume.id, &rel)? {
+                    Some(rec) if rec.size == f.size && rec.modified == f.modified => {
+                        c.photo(rec.photo_id)?.filter(|p| p.has_thumbnail)
                     }
-                    _ => false,
+                    _ => None,
                 };
-                if unchanged {
-                    c.touch_file(volume.id, &rel)?;
-                    report.unchanged += 1;
-                } else {
-                    todo.push((path.clone(), rel));
+                match known {
+                    Some(photo) => {
+                        c.touch_file(volume.id, &rel)?;
+                        report.unchanged += 1;
+                        if let Some(sh) = shared.as_mut() {
+                            if backfill {
+                                sh.publish(&photo.fingerprint, cache);
+                            }
+                            if backfill || sh.has_thumb(&photo.fingerprint) {
+                                sh.record(shared::Entry {
+                                    rel,
+                                    size: f.size,
+                                    modified: f.modified,
+                                    fingerprint: photo.fingerprint,
+                                    meta: photo.meta,
+                                });
+                            }
+                        }
+                    }
+                    None => todo.push((f.clone(), rel)),
                 }
             }
             Ok::<_, Error>(())
@@ -249,7 +378,7 @@ pub fn scan_cancellable(
             phase: Phase::Checking,
             done,
             total,
-            current: batch.last().cloned().unwrap_or_default(),
+            current: batch.last().map(|f| f.path.clone()).unwrap_or_default(),
         });
     }
 
@@ -258,10 +387,11 @@ pub fn scan_cancellable(
     for chunk in todo.chunks(32) {
         if cancel.load(Ordering::Relaxed) {
             report.cancelled = true;
+            save_shared(&mut shared);
             return Ok(report);
         }
-        let results: Vec<_> =
-            chunk.par_iter().map(|(p, rel)| ingest(p.clone(), rel.clone(), cache)).collect();
+        let sh = shared.as_ref();
+        let results: Vec<_> = chunk.par_iter().map(|(f, rel)| ingest(f, rel.clone(), cache, sh)).collect();
         let mut last = PathBuf::new();
         catalog.batch(|c| {
             for r in results {
@@ -269,6 +399,15 @@ pub fn scan_cancellable(
                 match r {
                     Ok(it) => {
                         record(c, &volume, &it, &mut report)?;
+                        if let (Some(sh), true) = (shared.as_mut(), it.thumb.is_ok()) {
+                            sh.record(shared::Entry {
+                                rel: it.rel.clone(),
+                                size: it.size,
+                                modified: it.modified,
+                                fingerprint: it.fingerprint.clone(),
+                                meta: it.meta.clone(),
+                            });
+                        }
                         last = it.path;
                     }
                     Err(f) => report.failed.push(f),
@@ -280,8 +419,19 @@ pub fn scan_cancellable(
         progress(&Progress { phase: Phase::Adding, done, total, current: last });
     }
 
+    if let Some(sh) = shared.as_mut() {
+        sh.forget_unseen(&prefix, &seen);
+    }
+    save_shared(&mut shared);
     report.missing = catalog.mark_unseen_missing(volume.id, &prefix, &started)?;
     Ok(report)
+}
+
+/// Saving the shared index is best-effort: a read-only share just means no sharing.
+fn save_shared(shared: &mut Option<shared::SharedCache>) {
+    if let Some(sh) = shared.as_mut() {
+        let _ = sh.save();
+    }
 }
 
 #[cfg(test)]

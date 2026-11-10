@@ -48,6 +48,11 @@ impl ThumbCache {
         self.root.join(size.dir()).join(shard).join(format!("{fingerprint}.jpg"))
     }
 
+    /// The grid thumbnail exists (the preview may still be fetched later, on demand).
+    pub fn has_thumb(&self, fingerprint: &str) -> bool {
+        self.path(fingerprint, Size::Thumb).is_file()
+    }
+
     pub fn has(&self, fingerprint: &str) -> bool {
         self.path(fingerprint, Size::Thumb).is_file() && self.path(fingerprint, Size::Preview).is_file()
     }
@@ -63,6 +68,32 @@ impl ThumbCache {
         let img = decode(src, mime)?;
         // libheif already applies the HEIC file's own rotation; don't rotate twice.
         let img = if mime == "image/heic" { img } else { orient(img, orientation) };
+        let preview = shrink(&img, Size::Preview.max_edge());
+        self.write(&preview, &self.path(fingerprint, Size::Preview))?;
+        let thumb = preview.thumbnail(Size::Thumb.max_edge(), Size::Thumb.max_edge());
+        self.write(&thumb, &self.path(fingerprint, Size::Thumb))
+    }
+
+    /// [`generate`](Self::generate) from a plain image (JPEG, PNG, WebP, TIFF) already read
+    /// into memory.
+    pub fn generate_from_bytes(
+        &self,
+        bytes: &[u8],
+        fingerprint: &str,
+        mime: &str,
+        orientation: u16,
+    ) -> Result<(), String> {
+        let img = match (mime == "image/jpeg")
+            .then(|| jpeg_scaled_from(std::io::Cursor::new(bytes), Size::Preview.max_edge()))
+            .flatten()
+        {
+            Some(img) => img,
+            None => image::load_from_memory(bytes).map_err(|e| e.to_string())?,
+        };
+        self.save_both(orient(img, orientation), fingerprint)
+    }
+
+    fn save_both(&self, img: DynamicImage, fingerprint: &str) -> Result<(), String> {
         let preview = shrink(&img, Size::Preview.max_edge());
         self.write(&preview, &self.path(fingerprint, Size::Preview))?;
         let thumb = preview.thumbnail(Size::Thumb.max_edge(), Size::Thumb.max_edge());
@@ -135,7 +166,11 @@ fn decode_heic(_src: &Path) -> Result<DynamicImage, String> {
 /// that's a quarter of the pixels and several times faster than a full decode.
 fn jpeg_scaled(src: &Path, max_edge: u32) -> Option<DynamicImage> {
     let f = std::fs::File::open(src).ok()?;
-    let mut d = jpeg_decoder::Decoder::new(std::io::BufReader::new(f));
+    jpeg_scaled_from(std::io::BufReader::new(f), max_edge)
+}
+
+fn jpeg_scaled_from(reader: impl std::io::Read, max_edge: u32) -> Option<DynamicImage> {
+    let mut d = jpeg_decoder::Decoder::new(reader);
     d.read_info().ok()?;
     let info = d.info()?;
     let (w, h) = (u32::from(info.width), u32::from(info.height));

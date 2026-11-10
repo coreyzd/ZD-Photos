@@ -431,6 +431,12 @@ impl qobject::Library {
                             r.new_photos,
                             r.unchanged + r.new_locations
                         );
+                        if r.thumbnails_from_share > 0 {
+                            m += &format!(
+                                " ({} previews taken from the Home Library)",
+                                r.thumbnails_from_share
+                            );
+                        }
                         if r.missing > 0 {
                             m += &format!(", {} no longer there", r.missing);
                         }

@@ -32,6 +32,17 @@ pub fn is_raw(mime: &str) -> bool {
 /// Read metadata. Never fails: missing fields stay `None`, and capture time falls
 /// back to the file's modification time.
 pub fn read_meta(path: &Path, mime: &str) -> PhotoMeta {
+    read_meta_impl(path, mime, None)
+}
+
+/// [`read_meta`] for plain images (JPEG, PNG, WebP, TIFF) using bytes already in memory
+/// (the start of the file is enough: EXIF and the image header live there), so nothing
+/// is re-read from a slow network share.
+pub fn read_meta_from(path: &Path, mime: &str, bytes: &[u8]) -> PhotoMeta {
+    read_meta_impl(path, mime, Some(bytes))
+}
+
+fn read_meta_impl(path: &Path, mime: &str, bytes: Option<&[u8]>) -> PhotoMeta {
     let mut meta = PhotoMeta { mime: mime.to_string(), orientation: 1, ..Default::default() };
 
     let video = mime.starts_with("video/").then(|| crate::video::probe(path).unwrap_or_default());
@@ -39,6 +50,8 @@ pub fn read_meta(path: &Path, mime: &str) -> PhotoMeta {
         canon_exif(&v.meta_bytes)
     } else if mime == "image/x-canon-cr3" {
         read_head(path, 512 * 1024).map(|b| canon_exif(&b)).unwrap_or_default()
+    } else if let Some(b) = bytes {
+        Reader::new().read_from_container(&mut std::io::Cursor::new(b)).ok().into_iter().collect()
     } else {
         File::open(path)
             .ok()
@@ -68,7 +81,9 @@ pub fn read_meta(path: &Path, mime: &str) -> PhotoMeta {
         .or_else(|| text(Tag::DateTime))
         .and_then(|s| exif_date(&s))
         .or_else(|| video.as_ref().and_then(|v| v.created.clone()))
-        .or_else(|| file_time(path));
+        // With bytes in hand the caller fills this in from metadata it already has, rather
+        // than another round trip to a network share.
+        .or_else(|| if bytes.is_some() { None } else { file_time(path) });
     meta.camera_make = text(Tag::Make);
     meta.camera_model = text(Tag::Model);
     meta.lens = text(Tag::LensModel);
@@ -82,7 +97,14 @@ pub fn read_meta(path: &Path, mime: &str) -> PhotoMeta {
         meta.duration_ms = v.duration_ms;
     } else if !is_raw(mime) {
         // The image header is the truth for dimensions; EXIF can be stale after edits.
-        if let Ok((w, h)) = image::image_dimensions(path) {
+        let dims = match bytes {
+            Some(b) => image::ImageReader::new(std::io::Cursor::new(b))
+                .with_guessed_format()
+                .map_err(image::ImageError::IoError)
+                .and_then(|r| r.into_dimensions()),
+            None => image::image_dimensions(path),
+        };
+        if let Ok((w, h)) = dims {
             meta.width = Some(w);
             meta.height = Some(h);
         }
@@ -119,8 +141,18 @@ pub fn exif_date(s: &str) -> Option<String> {
 }
 
 fn file_time(path: &Path) -> Option<String> {
-    let m = std::fs::metadata(path).ok()?.modified().ok()?;
-    let local: chrono::DateTime<chrono::Local> = m.into();
+    mtime_string(&std::fs::metadata(path).ok()?)
+}
+
+/// Unix seconds as `YYYY-MM-DDTHH:MM:SS` local time.
+pub fn unix_to_local_string(secs: i64) -> Option<String> {
+    let t = chrono::DateTime::from_timestamp(secs, 0)?.with_timezone(&chrono::Local);
+    Some(t.format("%Y-%m-%dT%H:%M:%S").to_string())
+}
+
+/// A file's modification time as `YYYY-MM-DDTHH:MM:SS` local time (capture-date fallback).
+pub fn mtime_string(md: &std::fs::Metadata) -> Option<String> {
+    let local: chrono::DateTime<chrono::Local> = md.modified().ok()?.into();
     Some(local.format("%Y-%m-%dT%H:%M:%S").to_string())
 }
 

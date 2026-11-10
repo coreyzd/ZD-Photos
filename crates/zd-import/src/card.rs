@@ -88,7 +88,16 @@ pub fn import(
             Ok((dest, hash)) => {
                 let rel_in_dest = zd_volumes::rel_string(dest.strip_prefix(dest_root).unwrap_or(&dest));
                 let rel = if prefix.is_empty() { rel_in_dest } else { format!("{prefix}/{rel_in_dest}") };
-                match ingest(dest.clone(), rel, cache) {
+                let found = match fs::metadata(&dest) {
+                    Ok(md) => {
+                        crate::Found { path: dest.clone(), size: md.len(), modified: crate::mtime(&md) }
+                    }
+                    Err(e) => {
+                        report.failed.push((dest.clone(), e.to_string()));
+                        continue;
+                    }
+                };
+                match ingest(&found, rel, cache, None) {
                     Ok(it) => {
                         let id = record(catalog, &volume, &it, &mut report.catalog)?;
                         catalog.set_full_hash(id, &hash)?;

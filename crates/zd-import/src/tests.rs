@@ -177,3 +177,100 @@ fn cancelled_scan_marks_nothing_missing() {
     assert_eq!((r.new_photos, r.missing), (0, 0));
     assert_eq!(c.stats().unwrap().files, 1); // a.jpg not flagged by an incomplete scan
 }
+
+/// nobara-zd scans the share from its own disk and fills `.zdphotos`; the laptop then sees
+/// the same folder as a network share and must not need to open the photos at all.
+#[test]
+fn laptop_uses_the_servers_shared_cache_without_opening_photos() {
+    use zd_volumes::{home, normalize_share, MountInfo};
+    let d = tempfile::tempdir().unwrap();
+    let share = d.path().join("Photos");
+    for (i, name) in ["2025/heron.jpg", "2025/warbler.jpg", "2026/owl.jpg"].iter().enumerate() {
+        jpeg(&share.join(name), 900, 600, i as u8 * 40);
+    }
+
+    // --- the server: the share is a local folder here
+    let server = Catalog::open_in_memory().unwrap();
+    let server_cache = ThumbCache::new(d.path().join("server-cache"));
+    home::configure(&server, "smb://nobara-zd.local/Photos").unwrap();
+    home::set_local_path(&server, Some(&share)).unwrap();
+    let hv = home::connect(&server, &[]).unwrap().unwrap();
+    assert!(home::served_here(&server, &hv));
+    let r = scan(&server, &server_cache, &share, &mut noop).unwrap();
+    assert_eq!((r.new_photos, r.thumbnails_made, r.index_hits), (3, 3, 0));
+    assert!(share.join(".zdphotos/index.jsonl").is_file());
+
+    // Replace every photo with same-size junk and put the dates back. Anything that opens
+    // a file from now on gets a different fingerprint or fails to decode.
+    for name in ["2025/heron.jpg", "2025/warbler.jpg", "2026/owl.jpg"] {
+        let p = share.join(name);
+        let md = std::fs::metadata(&p).unwrap();
+        std::fs::write(&p, vec![0x55u8; md.len() as usize]).unwrap();
+        let f = std::fs::File::options().write(true).open(&p).unwrap();
+        f.set_modified(md.modified().unwrap()).unwrap();
+    }
+
+    // --- the laptop: same folder, reached as \\nobara-zd.local\Photos
+    let laptop = Catalog::open_in_memory().unwrap();
+    let laptop_cache = ThumbCache::new(d.path().join("laptop-cache"));
+    home::configure(&laptop, r"\\nobara-zd.local\Photos").unwrap();
+    let m = MountInfo {
+        mount: share.clone(),
+        label: Some("photos".into()),
+        fs_id: None,
+        network_path: Some(normalize_share(r"\\nobara-zd.local\Photos")),
+        kind: VolumeKind::Network,
+        device: None,
+    };
+    let lv = home::connect(&laptop, &[m]).unwrap().unwrap();
+    assert_eq!(lv.uuid, hv.uuid, "same Home Library on both computers");
+    assert!(!home::served_here(&laptop, &lv));
+
+    let r = scan(&laptop, &laptop_cache, &share, &mut noop).unwrap();
+    assert!(r.failed.is_empty(), "{:?}", r.failed);
+    assert_eq!((r.new_photos, r.index_hits, r.thumbnails_from_share, r.thumbnails_made), (3, 3, 3, 0));
+
+    let fps = |c: &Catalog| {
+        let mut v: Vec<String> = c.photos(10, 0).unwrap().into_iter().map(|p| p.fingerprint).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(fps(&laptop), fps(&server), "fingerprints came from the index, not the junk files");
+    for p in laptop.photos(10, 0).unwrap() {
+        assert!(p.has_thumbnail && laptop_cache.has_thumb(&p.fingerprint));
+        assert_eq!(p.meta.width, Some(900));
+    }
+}
+
+#[test]
+fn server_backfills_the_shared_cache_and_edits_are_reread() {
+    use zd_volumes::home;
+    let d = tempfile::tempdir().unwrap();
+    let share = d.path().join("Photos");
+    jpeg(&share.join("a.jpg"), 300, 200, 1);
+    jpeg(&share.join("b.jpg"), 300, 200, 2);
+    let c = Catalog::open_in_memory().unwrap();
+    let cache = ThumbCache::new(d.path().join("cache"));
+    home::configure(&c, "smb://nobara-zd.local/Photos").unwrap();
+    home::set_local_path(&c, Some(&share)).unwrap();
+    home::connect(&c, &[]).unwrap();
+    scan(&c, &cache, &share, &mut noop).unwrap();
+
+    // Shared cache deleted (or this is the first run of a newer version): the next scan
+    // refills it from what this computer already knows, without re-reading photos.
+    std::fs::remove_dir_all(share.join(".zdphotos")).unwrap();
+    let r = scan(&c, &cache, &share, &mut noop).unwrap();
+    assert_eq!((r.unchanged, r.thumbnails_made), (2, 0));
+    let sh = shared::SharedCache::open(&share).unwrap();
+    assert_eq!(sh.len(), 2);
+
+    // A photo edited in place gets a new date: it's read again and the index follows.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    jpeg(&share.join("b.jpg"), 300, 200, 99);
+    let r = scan(&c, &cache, &share, &mut noop).unwrap();
+    assert_eq!((r.unchanged, r.new_photos), (1, 1));
+    // And a deleted photo leaves the index.
+    std::fs::remove_file(share.join("a.jpg")).unwrap();
+    scan(&c, &cache, &share, &mut noop).unwrap();
+    assert_eq!(shared::SharedCache::open(&share).unwrap().len(), 1);
+}

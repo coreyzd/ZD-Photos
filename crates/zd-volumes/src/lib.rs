@@ -257,6 +257,24 @@ pub mod home {
         Vec::new()
     }
 
+    /// True if this computer serves the Home Library itself (its files are on a local disk
+    /// here), so reading them is fast and this computer should fill the shared cache.
+    pub fn served_here(catalog: &Catalog, volume: &Volume) -> bool {
+        let Some(mount) = volume.last_mount.as_deref().map(PathBuf::from) else { return false };
+        let mount = std::fs::canonicalize(&mount).unwrap_or(mount);
+        let same = |p: &Path| std::fs::canonicalize(p).map(|p| p == mount).unwrap_or(false);
+        if let Ok(Some(local)) = catalog.setting(LOCAL_SETTING) {
+            if !local.is_empty() && same(Path::new(&local)) {
+                return true;
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(share) = volume.network_path.as_deref() {
+            return crate::linux::served_locally(share).iter().any(|p| same(p));
+        }
+        false
+    }
+
     /// Detect the Home Library, record it in the catalog and flag it as home.
     pub fn connect(catalog: &Catalog, mounts: &[MountInfo]) -> Result<Option<Volume>> {
         let Some(m) = find(catalog, mounts)? else { return Ok(None) };

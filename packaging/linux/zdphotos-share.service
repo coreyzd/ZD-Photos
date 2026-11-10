@@ -1,0 +1,12 @@
+[Unit]
+Description=ZD-Photos: keep the Home Library's shared thumbnail cache up to date
+# The share's disk is mounted by the desktop session (/run/media/...), so this runs as your
+# user while you're logged in.
+
+[Service]
+Type=oneshot
+ExecStart=%h/.cargo/bin/zdp scan-home
+# Stay out of the way of games, video calls, Plex...
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=20

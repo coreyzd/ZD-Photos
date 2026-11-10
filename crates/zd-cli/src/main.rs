@@ -34,6 +34,9 @@ enum Cmd {
     },
     /// Catalogue all photos under a folder (or a whole drive).
     Scan { folder: PathBuf },
+    /// Scan the whole Home Library. On the computer serving the share this also fills the
+    /// shared thumbnail cache that other computers use (run by the systemd timer).
+    ScanHome,
     /// Import new photos from an SD card into a folder.
     Card {
         /// Where to copy them (dated sub-folders are created).
@@ -129,8 +132,30 @@ fn main() -> Result<()> {
             let r = zd_import::scan(&catalog, &cache, &folder, &mut progress_bar)?;
             eprintln!();
             println!(
-                "{} photo files: {} new photos, {} new locations, {} unchanged, {} thumbnails made, {} now missing",
-                r.files_found, r.new_photos, r.new_locations, r.unchanged, r.thumbnails_made, r.missing
+                "{} photo files: {} new photos, {} new locations, {} unchanged, {} thumbnails made, {} from the shared cache, {} now missing",
+                r.files_found, r.new_photos, r.new_locations, r.unchanged, r.thumbnails_made, r.thumbnails_from_share, r.missing
+            );
+            for (p, e) in r.failed.iter().take(20) {
+                println!("  ! {}: {e}", p.display());
+            }
+        }
+        Cmd::ScanHome => {
+            refresh(&catalog)?;
+            let home = catalog.home_library()?.filter(|v| v.online).context(
+                "the Home Library isn't reachable (set it with `zdp home …`, and check the share is mounted)",
+            )?;
+            let mount = PathBuf::from(home.last_mount.clone().unwrap_or_default());
+            let serving = zd_volumes::home::served_here(&catalog, &home);
+            println!(
+                "Scanning Home Library at {}{}",
+                mount.display(),
+                if serving { " (served from this computer: filling the shared cache)" } else { "" }
+            );
+            let r = zd_import::scan(&catalog, &cache, &mount, &mut progress_bar)?;
+            eprintln!();
+            println!(
+                "{} files: {} new photos, {} unchanged, {} thumbnails made, {} from the shared cache, {} now missing",
+                r.files_found, r.new_photos, r.unchanged, r.thumbnails_made, r.thumbnails_from_share, r.missing
             );
             for (p, e) in r.failed.iter().take(20) {
                 println!("  ! {}: {e}", p.display());
