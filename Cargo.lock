@@ -1696,6 +1696,7 @@ dependencies = [
  "cxx-qt-build",
  "cxx-qt-lib",
  "directories",
+ "serde_json",
  "zd-catalog",
  "zd-import",
  "zd-volumes",

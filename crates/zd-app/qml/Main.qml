@@ -44,6 +44,12 @@ ApplicationWindow {
             const i = args.indexOf("--scan")
             if (i >= 0 && i + 1 < args.length)
                 scanFolder(Qt.resolvedUrl("file://" + args[i + 1]).toString())
+            // `--view <n>` opens the viewer on the n-th photo (and `--info` its info panel).
+            const v = args.indexOf("--view")
+            if (v >= 0 && v + 1 < args.length) {
+                viewer.openAt(parseInt(args[v + 1]))
+                viewer.infoOpen = args.indexOf("--info") >= 0
+            }
         }
         // Rebuild the grid but keep her place, so photos appearing during a scan don't
         // throw the view back to the top.
@@ -52,6 +58,18 @@ ApplicationWindow {
             grid.model = 0
             grid.model = library.count
             grid.contentY = Math.min(y, Math.max(0, grid.contentHeight - grid.height))
+        }
+    }
+
+    // Full-screen viewer, above everything (header and footer included).
+    Viewer {
+        id: viewer
+        parent: Overlay.overlay
+        anchors.fill: parent
+        library: library
+        onClosed: (index) => {
+            grid.positionViewAtIndex(index, GridView.Contain)
+            grid.forceActiveFocus()
         }
     }
 
@@ -267,19 +285,21 @@ ApplicationWindow {
                         width: driveList.width - 16
                         glyph: kind === "home" ? "\u2302" : kind === "cloud" ? "\u2601" : kind === "card" ? "\u25A3"
                              : kind === "network" ? "\u21C4" : kind === "internal" ? "\u25A4" : "\u25AD"
-                        label: library.volumeLabel(index)
+                        readonly property string name: library.volumeLabel(index)
+                        readonly property string letter: library.volumeLetter(index)
+                        label: letter !== "" ? name + " (" + letter + ")" : name
                         detail: library.volumePhotos(index) > 0 ? library.volumePhotos(index).toLocaleString(Qt.locale(), "f", 0) : ""
                         online: library.volumeOnline(index)
                         selected: library.selectedVolume === vid
                         onClicked: library.selectVolume(vid)
                         onRightClicked: {
                             driveMenu.volumeId = vid
-                            driveMenu.label = label
+                            driveMenu.label = name
                             driveMenu.kind = kind
                             driveMenu.online = online
                             driveMenu.popup()
                         }
-                        onDoubleClicked: renameDialog.openFor(vid, label)
+                        onDoubleClicked: renameDialog.openFor(vid, name)
                     }
                 }
             }
@@ -381,9 +401,10 @@ ApplicationWindow {
                         }
                     }
 
-                    ToolTip.visible: hover.hovered
+                    ToolTip.visible: hover.hovered && !viewer.visible
                     ToolTip.text: library.caption(index)
-                    HoverHandler { id: hover }
+                    HoverHandler { id: hover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: viewer.openAt(index) }
                 }
             }
 

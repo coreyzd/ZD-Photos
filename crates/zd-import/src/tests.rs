@@ -274,3 +274,34 @@ fn server_backfills_the_shared_cache_and_edits_are_reread() {
     scan(&c, &cache, &share, &mut noop).unwrap();
     assert_eq!(shared::SharedCache::open(&share).unwrap().len(), 1);
 }
+
+#[test]
+fn viewer_preview_comes_from_cheapest_source() {
+    let d = tempfile::tempdir().unwrap();
+    let photo = d.path().join("a.jpg");
+    jpeg(&photo, 3000, 2000, 7);
+    let fp = fingerprint::fingerprint(&photo).unwrap().0;
+    let cache = ThumbCache::new(d.path().join("cache"));
+
+    // Drive unplugged and nothing cached: nothing to show.
+    assert!(ensure_preview(&cache, &fp, "image/jpeg", 1, None, None).is_err());
+
+    // The Home Library's shared cache has it: copied, the photo isn't needed.
+    let share = d.path().join("share");
+    let shared = ThumbCache::new(share.join(shared::DIR_NAME));
+    shared.generate(&photo, &fp, "image/jpeg", 1).unwrap();
+    let (p, src) = ensure_preview(&cache, &fp, "image/jpeg", 1, None, Some(&share)).unwrap();
+    assert_eq!(src, PreviewSource::Shared);
+    assert_eq!(image::image_dimensions(&p).unwrap(), (2560, 1707));
+
+    // Now it's local.
+    let (_, src) = ensure_preview(&cache, &fp, "image/jpeg", 1, None, None).unwrap();
+    assert_eq!(src, PreviewSource::Cached);
+
+    // Otherwise from the original.
+    let cache2 = ThumbCache::new(d.path().join("cache2"));
+    let (_, src) =
+        ensure_preview(&cache2, &fp, "image/jpeg", 1, Some(&photo), Some(&share.join("nope"))).unwrap();
+    assert_eq!(src, PreviewSource::Original);
+    assert!(cache2.has(&fp));
+}

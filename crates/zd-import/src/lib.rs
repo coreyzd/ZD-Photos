@@ -434,6 +434,44 @@ fn save_shared(shared: &mut Option<shared::SharedCache>) {
     }
 }
 
+/// Where the full-screen preview came from (see [`ensure_preview`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewSource {
+    /// Already in the local cache.
+    Cached,
+    /// Copied from the Home Library's shared cache (fast, ~0.5 MB).
+    Shared,
+    /// Made from the original file just now.
+    Original,
+}
+
+/// Make sure the 2560 px preview of a photo is in the local cache, for the full-screen
+/// viewer. Cheapest source first: the local cache, then the Home Library's shared cache
+/// (`share_root` is the Home Library's folder), then the original file (if its drive is
+/// plugged in). Making it from the original also refreshes the grid thumbnail.
+pub fn ensure_preview(
+    cache: &ThumbCache,
+    fingerprint: &str,
+    mime: &str,
+    orientation: u16,
+    original: Option<&Path>,
+    share_root: Option<&Path>,
+) -> std::result::Result<(PathBuf, PreviewSource), String> {
+    let dest = cache.path(fingerprint, Size::Preview);
+    if dest.is_file() {
+        return Ok((dest, PreviewSource::Cached));
+    }
+    if let Some(root) = share_root {
+        let src = ThumbCache::new(root.join(shared::DIR_NAME)).path(fingerprint, Size::Preview);
+        if src.is_file() && shared::copy_atomic(&src, &dest).is_ok() {
+            return Ok((dest, PreviewSource::Shared));
+        }
+    }
+    let original = original.ok_or_else(|| "its drive isn't plugged in".to_string())?;
+    cache.generate(original, fingerprint, mime, orientation)?;
+    Ok((dest, PreviewSource::Original))
+}
+
 #[cfg(test)]
 pub(crate) mod testutil {
     use std::path::Path;

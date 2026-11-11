@@ -24,6 +24,7 @@ jobs:
       - uses: jurplel/install-qt-action@v4
         with:
           version: "6.8.*"
+          modules: qtmultimedia   # video playback in the viewer
           cache: true
       - name: Point cxx-qt at Qt (Linux)
         if: runner.os == 'Linux'

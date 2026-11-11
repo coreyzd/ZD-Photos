@@ -206,7 +206,7 @@ fn probe_writable(dir: &Path) -> bool {
     ok
 }
 
-fn copy_atomic(src: &Path, dest: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_atomic(src: &Path, dest: &Path) -> std::io::Result<()> {
     if let Some(dir) = dest.parent() {
         fs::create_dir_all(dir)?;
     }

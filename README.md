@@ -6,7 +6,7 @@ Design doc and roadmap: <https://claude.ai/artifact/9D3huBc87zkKkERRYMSVyi>
 
 ## Status: Phase 1 — Library (in progress)
 
-Phase 0 (foundations) is complete and verified on her Windows laptop. Phase 1 so far: HEIC photos (libheif), background scanning with phase progress and Stop, live grid updates during scans, placeholder tiles naming any file that couldn't be previewed (`zdp thumbs` explains why and retries), a drives sidebar (photo counts, filter by drive, rename by double-click or right-click), cloud drives (Google Drive, OneDrive, Dropbox) recognised and never written to, and roughly 2× faster thumbnails for large JPEGs.
+Phase 0 (foundations) is complete and verified on her Windows laptop. Phase 1 so far: HEIC photos (libheif), background scanning with phase progress and Stop, live grid updates during scans, placeholder tiles naming any file that couldn't be previewed (`zdp thumbs` explains why and retries), a drives sidebar (photo counts, filter by drive, rename by double-click or right-click), cloud drives (Google Drive, OneDrive, Dropbox) recognised and never written to, roughly 2× faster thumbnails for large JPEGs, a shared thumbnail cache on the Home Library, and a full-screen viewer with video playback.
 
 | Crate | What it does |
 | --- | --- |
@@ -14,7 +14,7 @@ Phase 0 (foundations) is complete and verified on her Windows laptop. Phase 1 so
 | `zd-volumes` | Recognises drives, network shares and SD cards across unplug/replug and drive-letter changes; finds the Home Library share |
 | `zd-import` | Folder scanning, content fingerprints, EXIF (incl. Canon CR3), thumbnail/preview cache, SD card import with verified copies |
 | `zd-cli` | `zdp`, a command-line tool for exercising the core |
-| `zd-app` | `zd-photos`, the Qt 6 / QML desktop app: drives sidebar, resizable thumbnail grid (slider or Ctrl+wheel), background scanning, video and offline badges. `zd-photos --scan <folder>` starts a scan on launch (handy for testing) |
+| `zd-app` | `zd-photos`, the Qt 6 / QML desktop app: drives sidebar, resizable thumbnail grid (slider or Ctrl+wheel), background scanning, video and offline badges, full-screen viewer. For testing: `zd-photos --scan <folder>` starts a scan on launch, `zd-photos --view 0 [--info]` opens the viewer on the first photo |
 
 CI (GitHub Actions) lints, tests and builds everything on Linux and Windows, and produces a ready-to-run Windows folder (`zd-photos-windows` artifact) with Qt bundled.
 
@@ -27,10 +27,10 @@ CI (GitHub Actions) lints, tests and builds everything on Linux and Windows, and
 
 ## Building
 
-Requires Rust 1.82+, libheif 1.17+ (for Pixel/iPhone HEIC photos) and, for the app, Qt 6 (base + declarative). Without Qt, build the core with `cargo test --workspace --exclude zd-app`; without libheif, add `--no-default-features` for `zd-import` (HEIC files then show placeholder tiles).
+Requires Rust 1.82+, libheif 1.17+ (for Pixel/iPhone HEIC photos) and, for the app, Qt 6.5+ (base + declarative; multimedia for video playback, which is only needed at run time; without it, videos show their poster frame and a note). Without Qt, build the core with `cargo test --workspace --exclude zd-app`; without libheif, add `--no-default-features` for `zd-import` (HEIC files then show placeholder tiles).
 
 ```sh
-# Fedora / Nobara: sudo dnf install qt6-qtbase-devel qt6-qtdeclarative-devel libheif-devel
+# Fedora / Nobara: sudo dnf install qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtmultimedia libheif-devel
 #   HEIC photos are HEVC-compressed; Fedora's own libheif can't decode HEVC, the RPM Fusion
 #   plugin can: sudo dnf install libheif-freeworld
 cargo test --workspace
@@ -85,10 +85,28 @@ systemctl --user start zdphotos-share.service  # first run now (watch: journalct
 
 Or by hand: `zdp scan-home`.
 
+## The viewer
+
+Click (or tap) a photo to open it over the whole window.
+
+| | |
+| --- | --- |
+| Next / previous | → ← keys, Page Up/Down, the arrows at the sides, or swipe on the touchscreen |
+| First / last | Home / End |
+| Zoom | Mouse wheel, pinch, + / −; double-click or double-tap for 100%, again to fit; 0 fits |
+| Move around when zoomed | Drag |
+| Info panel (date, camera, lens, size, location, tags, which drives have it) | I, or the ⓘ button |
+| Full screen | F or F11 |
+| Play / pause a video | Space, or click it |
+| Back to the grid | Esc or Backspace |
+
+It shows the grid thumbnail instantly, then the sharp 2560 px preview: from the local cache, else the Home Library's shared cache, else made from the original in the background (the next and previous photos are fetched ahead). Zooming in past what the preview holds loads the original file, when its drive is plugged in, so feathers can be checked at full resolution. Photos on unplugged drives still open at preview size.
+
 ## Videos
 
-Videos from the R7 (and the Pixel) are catalogued like photos: MP4, M4V and MOV, with capture date, length, frame size and camera details. The grid shows a poster frame with a ▶ length badge. Poster frames come from `ffmpeg` when it's installed (Nobara ships it); otherwise from the small thumbnail Canon embeds in each video. Playback arrives in Phase 1.
+Videos from the R7 (and the Pixel) are catalogued like photos: MP4, M4V and MOV, with capture date, length, frame size and camera details. The grid shows a poster frame with a ▶ length badge. Poster frames come from `ffmpeg` when it's installed (Nobara ships it); otherwise from the small thumbnail Canon embeds in each video. The viewer plays them (Qt Multimedia) with play/pause, a seek bar and mute.
 
 ## Known limits
 
 - RAW files (CR3/CR2/DNG) use their embedded JPEG preview for thumbnails; full RAW development via LibRaw comes with the editor (Phase 2).
+- Zooming past the 2560 px preview uses the original for JPEG and PNG only; HEIC and RAW photos stay at preview resolution in the viewer for now.

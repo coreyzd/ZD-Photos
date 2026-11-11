@@ -8,6 +8,8 @@
 //!   stopped.
 //! * Exposes the drives sidebar: Home Library first, then her drives with photo
 //!   counts; picking one filters the grid; drives can be renamed.
+//! * Feeds the full-screen viewer: previews are fetched (local cache → Home Library's
+//!   shared cache → original file) on worker threads and announced with `previewReady`.
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -83,23 +85,56 @@ pub mod qobject {
         fn select_volume(self: Pin<&mut Library>, volume_id: i32);
         #[qinvokable]
         fn rename_volume(self: Pin<&mut Library>, volume_id: i32, name: &QString);
+        /// "D:" on Windows for a plugged-in drive, else empty.
+        #[qinvokable]
+        fn volume_letter(self: &Library, index: i32) -> QString;
+
+        // ---- viewer (index = position in the current view)
+        #[qinvokable]
+        fn photo_id(self: &Library, index: i32) -> i32;
+        /// Where a photo is in the current view now (views shift while a scan adds photos).
+        #[qinvokable]
+        fn index_of(self: &Library, photo_id: i32) -> i32;
+        #[qinvokable]
+        fn is_video(self: &Library, index: i32) -> bool;
+        /// The 2560 px preview if it's already cached; otherwise empty, and it is fetched in
+        /// the background and announced with `previewReady`. Also used to prefetch neighbours.
+        #[qinvokable]
+        fn preview_url(self: Pin<&mut Library>, index: i32) -> QString;
+        /// The original file, for zooming past the preview, when its drive is plugged in and
+        /// Qt can show it directly (JPEG, PNG). Empty otherwise.
+        #[qinvokable]
+        fn original_url(self: &Library, index: i32) -> QString;
+        /// The video file, when its drive is plugged in. Empty otherwise.
+        #[qinvokable]
+        fn video_url(self: &Library, index: i32) -> QString;
+        /// Everything for the info panel, as JSON.
+        #[qinvokable]
+        fn info_json(self: &Library, index: i32) -> QString;
+
+        /// A preview fetched by `previewUrl` is ready (`url`), or couldn't be made (`error`).
+        #[qsignal]
+        fn preview_ready(self: Pin<&mut Library>, photo_id: i32, url: &QString, error: &QString);
     }
 
     impl cxx_qt::Threading for Library {}
 }
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
-use zd_catalog::{Catalog, VolumeKind};
+use zd_catalog::{Catalog, Location, Photo, VolumeKind};
 use zd_import::{Size, ThumbCache};
 
 struct Item {
+    id: i64,
+    video: bool,
     thumb: String,
     /// Empty when there's a thumbnail; otherwise the file name to show instead.
     placeholder: String,
@@ -114,6 +149,8 @@ struct Drive {
     kind: &'static str,
     online: bool,
     photos: u64,
+    /// "D:" on Windows while plugged in.
+    letter: String,
 }
 
 pub struct LibraryRust {
@@ -135,6 +172,8 @@ pub struct LibraryRust {
     items: Vec<Item>,
     drives: Vec<Drive>,
     cancel: Arc<AtomicBool>,
+    /// Photos whose preview is being fetched right now.
+    fetching: Arc<Mutex<HashSet<i64>>>,
 }
 
 /// Same data folder the `zdp` tool uses, so photos imported there show up here.
@@ -172,6 +211,7 @@ impl Default for LibraryRust {
             items: Vec::new(),
             drives: Vec::new(),
             cancel: Arc::new(AtomicBool::new(false)),
+            fetching: Arc::default(),
         }
     }
 }
@@ -248,6 +288,168 @@ fn url_to_path(url: &str) -> PathBuf {
     PathBuf::from(percent_decode(path))
 }
 
+/// `D:\` -> `D:` (Windows drive roots only; Linux mounts and UNC shares get nothing).
+fn drive_letter(mount: &str) -> String {
+    let b = mount.as_bytes();
+    let is_root = b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && mount[2..].trim_matches(['\\', '/']).is_empty();
+    if is_root {
+        mount[..2].to_ascii_uppercase()
+    } else {
+        String::new()
+    }
+}
+
+/// `2026-05-04T07:12:00` -> `May 4, 2026 · 7:12 AM`
+fn pretty_datetime(iso: &str) -> String {
+    let date = pretty_date(iso);
+    let (Some(h), Some(m)) = (iso.get(11..13).and_then(|h| h.parse::<u32>().ok()), iso.get(14..16)) else {
+        return date;
+    };
+    let (h12, ampm) = match h {
+        0 => (12, "AM"),
+        1..=11 => (h, "AM"),
+        12 => (12, "PM"),
+        _ => (h - 12, "PM"),
+    };
+    format!("{date} \u{b7} {h12}:{m} {ampm}")
+}
+
+fn type_name(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "JPEG photo",
+        "image/heic" => "HEIC photo",
+        "image/png" => "PNG image",
+        "image/webp" => "WebP image",
+        "image/tiff" => "TIFF image",
+        "image/x-canon-cr3" => "Canon RAW (CR3)",
+        "image/x-canon-cr2" => "Canon RAW (CR2)",
+        "image/x-adobe-dng" => "RAW (DNG)",
+        "video/mp4" => "MP4 video",
+        "video/quicktime" => "MOV video",
+        _ => "File",
+    }
+}
+
+fn megabytes(bytes: u64) -> String {
+    let mb = bytes as f64 / 1_048_576.0;
+    if mb >= 10.0 {
+        format!("{mb:.0} MB")
+    } else {
+        format!("{mb:.1} MB")
+    }
+}
+
+/// "Canon EOS R7", not "Canon Canon EOS R7".
+fn camera_name(make: Option<&str>, model: Option<&str>) -> String {
+    match (make.map(str::trim), model.map(str::trim)) {
+        (Some(make), Some(model)) => {
+            let first = make.split_whitespace().next().unwrap_or(make);
+            if model.to_lowercase().starts_with(&first.to_lowercase()) {
+                model.to_string()
+            } else {
+                format!("{make} {model}")
+            }
+        }
+        (None, Some(m)) | (Some(m), None) => m.to_string(),
+        (None, None) => String::new(),
+    }
+}
+
+/// Info panel contents for one photo.
+fn info_value(
+    photo: &Photo,
+    locations: &[Location],
+    tags: Vec<String>,
+    backed_up: bool,
+) -> serde_json::Value {
+    let m = &photo.meta;
+    let mut rows: Vec<(&str, String)> = Vec::new();
+    if let Some(t) = m.taken_at.as_deref() {
+        rows.push(("Date", pretty_datetime(t)));
+    }
+    let camera = camera_name(m.camera_make.as_deref(), m.camera_model.as_deref());
+    if !camera.is_empty() {
+        rows.push(("Camera", camera));
+    }
+    if let Some(lens) = m.lens.as_deref().filter(|l| !l.trim().is_empty()) {
+        rows.push(("Lens", lens.trim().to_string()));
+    }
+    let mut size = Vec::new();
+    // As she sees it: a portrait shot is stored sideways with a "rotate" flag.
+    let (width, height) = match (m.width, m.height) {
+        (Some(w), Some(h)) if (5..=8).contains(&m.orientation) && m.mime != "image/heic" => {
+            (Some(h), Some(w))
+        }
+        dims => dims,
+    };
+    if let (Some(w), Some(h)) = (width, height) {
+        size.push(format!("{w} \u{d7} {h}"));
+        if !m.is_video() {
+            size.push(format!("{:.1} MP", f64::from(w) * f64::from(h) / 1e6));
+        }
+    }
+    size.push(megabytes(photo.size));
+    rows.push(("Size", size.join(" \u{b7} ")));
+    if let Some(ms) = m.duration_ms.filter(|_| m.is_video()) {
+        rows.push(("Length", clock(ms)));
+    }
+    rows.push(("Type", type_name(&m.mime).to_string()));
+
+    let (place, map) = match (m.gps_lat, m.gps_lon) {
+        (Some(lat), Some(lon)) => (
+            format!("{lat:.5}, {lon:.5}"),
+            format!("https://www.openstreetmap.org/?mlat={lat:.6}&mlon={lon:.6}#map=15/{lat:.6}/{lon:.6}"),
+        ),
+        _ => (String::new(), String::new()),
+    };
+
+    let files: Vec<serde_json::Value> = locations
+        .iter()
+        .map(|l| {
+            let state = if l.missing {
+                "missing"
+            } else if l.online {
+                "online"
+            } else {
+                "offline"
+            };
+            serde_json::json!({
+                "drive": l.volume_label,
+                "home": l.is_home_library,
+                "path": l.rel_path,
+                "state": state,
+            })
+        })
+        .collect();
+
+    let name = locations
+        .first()
+        .map(|l| l.rel_path.rsplit('/').next().unwrap_or(&l.rel_path).to_string())
+        .unwrap_or_default();
+    serde_json::json!({
+        "name": name,
+        "title": m.taken_at.as_deref().map(pretty_datetime).unwrap_or_else(|| name.clone()),
+        "rows": rows.iter().map(|(k, v)| serde_json::json!({"label": k, "value": v})).collect::<Vec<_>>(),
+        "place": place,
+        "map": map,
+        "files": files,
+        "tags": tags,
+        "backedUp": backed_up,
+        "width": width,
+        "height": height,
+    })
+}
+
+/// The best copy to open: plugged-in local drives before network shares.
+fn best_original(locations: &[Location]) -> Option<PathBuf> {
+    let local =
+        locations.iter().filter(|l| l.volume_kind != VolumeKind::Network).find_map(|l| l.current_path());
+    local.or_else(|| locations.iter().find_map(|l| l.current_path()))
+}
+
 impl qobject::Library {
     /// Reload drives and the current view from the catalog (UI thread, fast).
     fn reload(mut self: Pin<&mut Self>) {
@@ -264,6 +466,11 @@ impl qobject::Library {
             .unwrap_or_default()
             .into_iter()
             .map(|v| Drive {
+                letter: if v.online {
+                    drive_letter(v.last_mount.as_deref().unwrap_or(""))
+                } else {
+                    String::new()
+                },
                 id: v.id,
                 kind: kind_name(v.kind, v.is_home_library),
                 online: v.online,
@@ -285,6 +492,8 @@ impl qobject::Library {
                     .filter(|s| !s.is_empty())
                     .collect();
                 Item {
+                    id: p.id,
+                    video: p.is_video,
                     thumb: if p.has_thumbnail {
                         file_url(&rust.cache.path(&p.fingerprint, Size::Thumb))
                     } else {
@@ -520,6 +729,117 @@ impl qobject::Library {
         }
         self.as_mut().reload();
     }
+    pub fn volume_letter(&self, index: i32) -> QString {
+        self.drive(index).map(|d| QString::from(&d.letter)).unwrap_or_default()
+    }
+
+    // ---- viewer
+
+    pub fn photo_id(&self, index: i32) -> i32 {
+        self.item(index).map_or(-1, |i| i.id as i32)
+    }
+
+    pub fn index_of(&self, photo_id: i32) -> i32 {
+        let id = i64::from(photo_id);
+        self.rust().items.iter().position(|i| i.id == id).map_or(-1, |p| p as i32)
+    }
+
+    pub fn is_video(&self, index: i32) -> bool {
+        self.item(index).is_some_and(|i| i.video)
+    }
+
+    fn photo_and_locations(&self, index: i32) -> Option<(Photo, Vec<Location>)> {
+        let id = self.item(index)?.id;
+        let catalog = self.rust().catalog.as_ref()?;
+        let photo = catalog.photo(id).ok().flatten()?;
+        let locations = catalog.locations(id).unwrap_or_default();
+        Some((photo, locations))
+    }
+
+    pub fn preview_url(self: Pin<&mut Self>, index: i32) -> QString {
+        let Some((photo, locations)) = self.photo_and_locations(index) else {
+            return QString::default();
+        };
+        let rust = self.rust();
+        let cached = rust.cache.path(&photo.fingerprint, Size::Preview);
+        if cached.is_file() {
+            return QString::from(&file_url(&cached));
+        }
+        if !rust.fetching.lock().map(|mut f| f.insert(photo.id)).unwrap_or(false) {
+            return QString::default(); // already on its way
+        }
+
+        let cache = rust.cache.clone();
+        let fetching = rust.fetching.clone();
+        let data_dir = rust.data_dir.clone();
+        let share_root = rust
+            .catalog
+            .as_ref()
+            .and_then(|c| c.home_library().ok().flatten())
+            .filter(|v| v.online)
+            .and_then(|v| v.last_mount)
+            .map(PathBuf::from);
+        let original = best_original(&locations);
+        let qt = self.qt_thread();
+
+        std::thread::spawn(move || {
+            let result = zd_import::ensure_preview(
+                &cache,
+                &photo.fingerprint,
+                &photo.meta.mime,
+                photo.meta.orientation,
+                original.as_deref(),
+                share_root.as_deref(),
+            );
+            // A photo that had no thumbnail has one now.
+            let fixed_thumb =
+                matches!(result, Ok((_, zd_import::PreviewSource::Original))) && !photo.has_thumbnail;
+            if fixed_thumb {
+                if let Ok(c) = Catalog::open(data_dir.join("catalog.sqlite")) {
+                    let _ = c.set_has_thumbnail(photo.id, true);
+                }
+            }
+            if let Ok(mut f) = fetching.lock() {
+                f.remove(&photo.id);
+            }
+            let (url, error) = match result {
+                Ok((path, _)) => (file_url(&path), String::new()),
+                Err(e) => (String::new(), e),
+            };
+            let id = photo.id as i32;
+            let _ = qt.queue(move |mut lib| {
+                lib.as_mut().preview_ready(id, &QString::from(&url), &QString::from(&error));
+            });
+        });
+        QString::default()
+    }
+
+    pub fn original_url(&self, index: i32) -> QString {
+        let Some((photo, locations)) = self.photo_and_locations(index) else {
+            return QString::default();
+        };
+        if !matches!(photo.meta.mime.as_str(), "image/jpeg" | "image/png") {
+            return QString::default();
+        }
+        best_original(&locations).map(|p| QString::from(&file_url(&p))).unwrap_or_default()
+    }
+
+    pub fn video_url(&self, index: i32) -> QString {
+        let Some((_, locations)) = self.photo_and_locations(index).filter(|(p, _)| p.meta.is_video()) else {
+            return QString::default();
+        };
+        best_original(&locations).map(|p| QString::from(&file_url(&p))).unwrap_or_default()
+    }
+
+    pub fn info_json(&self, index: i32) -> QString {
+        let Some((photo, locations)) = self.photo_and_locations(index) else {
+            return QString::from("{}");
+        };
+        let catalog = self.rust().catalog.as_ref();
+        let tags = catalog.and_then(|c| c.photo_tags(photo.id).ok()).unwrap_or_default();
+        let backed_up = catalog.and_then(|c| c.is_backed_up(photo.id).ok()).unwrap_or(false);
+        QString::from(&info_value(&photo, &locations, tags, backed_up).to_string())
+    }
 }
 
 #[cfg(test)]
@@ -536,5 +856,16 @@ mod tests {
         assert_eq!(file_url(std::path::Path::new("/a/b.jpg")), "file:///a/b.jpg");
         assert_eq!(kind_name(VolumeKind::Cloud, false), "cloud");
         assert_eq!(kind_name(VolumeKind::Network, true), "home");
+        assert_eq!(drive_letter("D:\\"), "D:");
+        assert_eq!(drive_letter("e:"), "E:");
+        assert_eq!(drive_letter("D:\\Photos"), "");
+        assert_eq!(drive_letter("\\\\nobara-zd.local\\Photos"), "");
+        assert_eq!(drive_letter("/run/media/c/Passport"), "");
+        assert_eq!(pretty_datetime("2026-05-04T07:12:00"), "May 4, 2026 \u{b7} 7:12 AM");
+        assert_eq!(pretty_datetime("2026-05-04T00:05:00"), "May 4, 2026 \u{b7} 12:05 AM");
+        assert_eq!(pretty_datetime("2026-05-04T19:30:00"), "May 4, 2026 \u{b7} 7:30 PM");
+        assert_eq!(camera_name(Some("Canon"), Some("Canon EOS R7")), "Canon EOS R7");
+        assert_eq!(camera_name(Some("Google"), Some("Pixel 9 Pro")), "Google Pixel 9 Pro");
+        assert_eq!(megabytes(10_485_760), "10 MB");
     }
 }
